@@ -6,13 +6,10 @@ import { loadModel } from '../model/trainer.js';
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
-// In production (compiled), static files live in dist/dashboard/public.
-// In dev (tsx), they live in src/dashboard/public.
-const isDev = process.argv[1]?.endsWith('.ts') || process.env.NODE_ENV === 'development';
-const staticDir = isDev
-  ? path.join(process.cwd(), 'src', 'dashboard', 'public')
-  : path.join(__dirname, 'dashboard', 'public');
-app.use(express.static(staticDir));
+// __dirname resolves correctly in both modes:
+//   tsx (dev):  src/dashboard/  → src/dashboard/public/
+//   node dist:  dist/dashboard/ → dist/dashboard/public/
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/stats', (_req, res) => {
   try {

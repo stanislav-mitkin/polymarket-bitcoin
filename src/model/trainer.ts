@@ -7,6 +7,8 @@ import {
   type LRModel, type RawRow,
 } from './logistic-regression.js';
 
+export type { LRModel };
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export const MIN_TRADES_FOR_TRAINING = 50;   // first retrain threshold

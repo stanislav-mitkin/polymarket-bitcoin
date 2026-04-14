@@ -51,7 +51,7 @@ async function fetchMarketByTs(ts: number): Promise<PolyMarket5M | null> {
     const res = await fetch(url, { headers: HEADERS });
     if (!res.ok) return null;
 
-    const events: any[] = await res.json();
+    const events = await res.json() as any[];
     const event = events[0];
     if (!event) return null;
 
