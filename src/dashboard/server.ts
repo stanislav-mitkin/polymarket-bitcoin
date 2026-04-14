@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'path';
-import { getStats, getRecentTrades, getPnlTimeline } from '../db/database.js';
-import { loadModel } from '../model/trainer.js';
+import { getStats, getRecentTrades, getPnlTimeline } from '../db/database';
+import { loadModel } from '../model/trainer';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;

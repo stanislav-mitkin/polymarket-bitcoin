@@ -1,5 +1,5 @@
-import { getUnsettledTrades, settleTradeById, type Trade } from '../db/database.js';
-import { resolveMarketOutcome } from './polymarket.js';
+import { getUnsettledTrades, settleTradeById, type Trade } from '../db/database';
+import { resolveMarketOutcome } from './polymarket';
 
 /**
  * Checks all trades whose market has expired but haven't been settled yet.

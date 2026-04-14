@@ -1,10 +1,10 @@
-import { type Features } from '../data/features.js';
-import { loadModel, type LRModel } from './trainer.js';
+import { type Features } from '../data/features';
+import { loadModel, type LRModel } from './trainer';
 import {
   extractFeatures,
   normSingle,
   predictProba,
-} from './logistic-regression.js';
+} from './logistic-regression';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
-import { saveTrade } from '../db/database.js';
-import { type Features } from '../data/features.js';
-import { type Prediction, TRADE_SIZE_USDC } from '../model/predictor.js';
-import { type PolyMarket5M } from './polymarket.js';
+import { saveTrade } from '../db/database';
+import { type Features } from '../data/features';
+import { type Prediction, TRADE_SIZE_USDC } from '../model/predictor';
+import { type PolyMarket5M } from './polymarket';
 
 export interface PaperTrade {
   tradeId: number;

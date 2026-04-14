@@ -1,11 +1,11 @@
 import fs from 'fs';
 import path from 'path';
-import db from '../db/database.js';
+import db from '../db/database';
 import {
   extractFeatures, fitNorm, applyNorm, trainLogisticRegression, evaluate,
   FEATURE_NAMES, NUM_FEATURES,
   type LRModel, type RawRow,
-} from './logistic-regression.js';
+} from './logistic-regression';
 
 export type { LRModel };
 

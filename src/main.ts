@@ -1,12 +1,12 @@
-import { startStreaming } from './data/collector.js';
-import { computeFeatures } from './data/features.js';
-import { getNextMarket } from './bot/polymarket.js';
-import { predict, reloadModel, getModelInfo } from './model/predictor.js';
-import { executePaperTrade } from './bot/paper-trader.js';
-import { settleExpiredTrades } from './bot/settler.js';
-import { startDashboard } from './dashboard/server.js';
-import { hasTradeForMarket } from './db/database.js';
-import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/trainer.js';
+import { startStreaming } from './data/collector';
+import { computeFeatures } from './data/features';
+import { getNextMarket } from './bot/polymarket';
+import { predict, reloadModel, getModelInfo } from './model/predictor';
+import { executePaperTrade } from './bot/paper-trader';
+import { settleExpiredTrades } from './bot/settler';
+import { startDashboard } from './dashboard/server';
+import { hasTradeForMarket } from './db/database';
+import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/trainer';
 
 const TICK_INTERVAL_MS = 60_000;       // Run prediction loop every 1 minute
 const SETTLE_INTERVAL_MS = 2 * 60_000; // Check settlements every 2 minutes
