@@ -6,7 +6,13 @@ import { loadModel } from '../model/trainer.js';
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
-app.use(express.static(path.join(process.cwd(), 'src', 'dashboard', 'public')));
+// In production (compiled), static files live in dist/dashboard/public.
+// In dev (tsx), they live in src/dashboard/public.
+const isDev = process.argv[1]?.endsWith('.ts') || process.env.NODE_ENV === 'development';
+const staticDir = isDev
+  ? path.join(process.cwd(), 'src', 'dashboard', 'public')
+  : path.join(__dirname, 'dashboard', 'public');
+app.use(express.static(staticDir));
 
 app.get('/api/stats', (_req, res) => {
   try {
@@ -52,7 +58,7 @@ app.get('/api/pnl-timeline', (_req, res) => {
 });
 
 export function startDashboard(): void {
-  const server = app.listen(PORT, () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Dashboard] Running at http://localhost:${PORT}`);
   });
 

@@ -5,7 +5,7 @@
   "main": "dist/main.js",
   "scripts": {
     "dev": "tsx watch src/main.ts",
-    "build": "tsc",
+    "build": "tsc && cp -r src/dashboard/public dist/dashboard/public",
     "start": "node dist/main.js",
     "dashboard": "tsx src/dashboard/server.ts"
   },
