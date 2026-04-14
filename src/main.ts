@@ -1,0 +1,106 @@
+import { startStreaming } from './data/collector.js';
+import { computeFeatures } from './data/features.js';
+import { getNextMarket } from './bot/polymarket.js';
+import { predict, reloadModel, getModelInfo } from './model/predictor.js';
+import { executePaperTrade } from './bot/paper-trader.js';
+import { settleExpiredTrades } from './bot/settler.js';
+import { startDashboard } from './dashboard/server.js';
+import { hasTradeForMarket } from './db/database.js';
+import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/trainer.js';
+
+const TICK_INTERVAL_MS = 60_000;       // Run prediction loop every 1 minute
+const SETTLE_INTERVAL_MS = 2 * 60_000; // Check settlements every 2 minutes
+const WARMUP_MS = 10_000;              // Wait for WS data before first tick
+
+async function tick(): Promise<void> {
+  try {
+    // 1. Settle any expired trades first
+    await settleExpiredTrades();
+
+    // 1b. Auto-retrain if enough new data has accumulated
+    const retrained = maybeRetrain();
+    if (retrained) reloadModel();
+
+    // 2. Find the next active market
+    const market = await getNextMarket();
+    if (!market) {
+      console.log('[Bot] No active BTC 5M market found, skipping...');
+      return;
+    }
+
+    // 3. Skip if we already have a trade for this market in DB (survives restarts)
+    if (hasTradeForMarket(market.id)) return;
+
+    // 4. Check there's enough time left to be meaningful (at least 60s)
+    const msUntilEnd = new Date(market.endDateIso).getTime() - Date.now();
+    if (msUntilEnd < 60_000) {
+      console.log(`[Bot] Market ${market.id} ends in ${Math.round(msUntilEnd / 1000)}s — too late, skipping`);
+      return;
+    }
+
+    // 5. Compute features from live Binance data
+    const features = await computeFeatures();
+    console.log(
+      `[Bot] Features | OBI=${features.obi} TFI=${features.tfi} ` +
+      `RSI=${features.rsi.toFixed(1)} Funding=${features.fundingRate.toFixed(4)}% ` +
+      `BTC=$${features.btcPrice.toLocaleString()}`
+    );
+
+    // 6. Run prediction model
+    const prediction = predict(features);
+    if (!prediction) {
+      console.log(`[Bot] Confidence below threshold — no trade`);
+      return;
+    }
+
+    // 7. Execute paper trade
+    executePaperTrade(market, prediction, features);
+
+  } catch (err) {
+    console.error('[Bot] Tick error:', err);
+  }
+}
+
+async function main(): Promise<void> {
+  console.log('═══════════════════════════════════════════');
+  console.log('  Polymarket BTC 5M — Paper Trading Bot');
+  console.log('═══════════════════════════════════════════');
+
+  // Start WebSocket streams from Binance
+  startStreaming();
+
+  // Start dashboard web server
+  startDashboard();
+
+  // Wait for WebSocket to warm up
+  console.log(`[Bot] Warming up for ${WARMUP_MS / 1000}s...`);
+  await new Promise(resolve => setTimeout(resolve, WARMUP_MS));
+
+  // Run first tick immediately
+  await tick();
+
+  // Schedule recurring ticks
+  setInterval(tick, TICK_INTERVAL_MS);
+
+  // Separate settler interval
+  setInterval(async () => {
+    try {
+      await settleExpiredTrades();
+    } catch (err) {
+      console.error('[Settler] Error:', err);
+    }
+  }, SETTLE_INTERVAL_MS);
+
+  const modelInfo = getModelInfo();
+  if (modelInfo.active) {
+    console.log(`[Bot] ML model active | trained on ${modelInfo.samples} samples | val_acc=${((modelInfo.valAcc ?? 0) * 100).toFixed(1)}%`);
+  } else {
+    console.log(`[Bot] Rule-based mode (ML activates after ${MIN_TRADES_FOR_TRAINING} settled trades, retrains every ${RETRAIN_EVERY})`);
+  }
+  console.log('[Bot] Running. Dashboard: http://localhost:3000');
+}
+
+main().catch(err => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});
