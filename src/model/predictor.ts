@@ -8,7 +8,9 @@ import {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const CONFIDENCE_THRESHOLD = 0.55;
+const CONFIDENCE_THRESHOLD = 0.65;    // baseline — below this is near-random (50.7% WR on 203 trades)
+const CONFIDENCE_THRESHOLD_UP = 0.72; // UP needs stronger signal — 154 trades at 48.1% WR, -$36.60
+const CONFIDENCE_MAX = 0.85;          // cap — overconfident trades: 38.5% WR, -$13.65
 export const TRADE_SIZE_USDC = 10;
 
 // ─── ML model (lazy-loaded, hot-swappable) ────────────────────────────────────
@@ -130,7 +132,15 @@ export function predict(f: Features): Prediction | null {
     const mlSignal: 'UP' | 'DOWN' = prob >= 0.5 ? 'UP' : 'DOWN';
     const mlConf = 0.5 + Math.abs(prob - 0.5); // distance from 0.5
 
-    if (mlConf < CONFIDENCE_THRESHOLD) return null;
+    const minConf = mlSignal === 'UP' ? CONFIDENCE_THRESHOLD_UP : CONFIDENCE_THRESHOLD;
+    if (mlConf < minConf) {
+      console.log(`[Predictor] SKIP (ML): ${mlSignal} conf=${mlConf.toFixed(3)} < ${minConf}`);
+      return null;
+    }
+    if (mlConf > CONFIDENCE_MAX) {
+      console.log(`[Predictor] SKIP (ML): overconfident ${mlConf.toFixed(3)} > ${CONFIDENCE_MAX} — historically 38.5% WR`);
+      return null;
+    }
 
     // Hard vetoes apply to the ML signal
     for (const rule of VETO_RULES) {
@@ -155,7 +165,15 @@ export function predict(f: Features): Prediction | null {
   }
 
   // ── Step 3: Rule-based fallback ──────────────────────────────────────
-  if (ruleConf < CONFIDENCE_THRESHOLD) return null;
+  const minRuleConf = ruleSignal === 'UP' ? CONFIDENCE_THRESHOLD_UP : CONFIDENCE_THRESHOLD;
+  if (ruleConf < minRuleConf) {
+    console.log(`[Predictor] SKIP (rules): ${ruleSignal} conf=${ruleConf.toFixed(3)} < ${minRuleConf}`);
+    return null;
+  }
+  if (ruleConf > CONFIDENCE_MAX) {
+    console.log(`[Predictor] SKIP (rules): overconfident ${ruleConf.toFixed(3)} > ${CONFIDENCE_MAX}`);
+    return null;
+  }
 
   // Hard vetoes for rule-based signal
   for (const rule of VETO_RULES) {
