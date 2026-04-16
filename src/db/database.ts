@@ -17,6 +17,7 @@ db.exec(`
     market_end    TEXT NOT NULL,
     signal        TEXT NOT NULL CHECK (signal IN ('UP', 'DOWN')),
     confidence    REAL NOT NULL,
+    edge          REAL,
     price_yes     REAL NOT NULL,
     price_no      REAL NOT NULL,
     size_usdc     REAL NOT NULL DEFAULT 10,
@@ -40,6 +41,9 @@ db.exec(`
   );
 `);
 
+// Add edge column to existing DBs (safe to run repeatedly — fails silently if column exists)
+try { db.exec('ALTER TABLE trades ADD COLUMN edge REAL'); } catch (_) {}
+
 export interface Trade {
   id?: number;
   created_at?: string;
@@ -47,6 +51,7 @@ export interface Trade {
   market_end: string;
   signal: 'UP' | 'DOWN';
   confidence: number;
+  edge?: number | null;
   price_yes: number;
   price_no: number;
   size_usdc: number;
@@ -80,8 +85,8 @@ export interface TradeStats {
 }
 
 const insertTrade = db.prepare<Trade>(`
-  INSERT INTO trades (market_id, market_end, signal, confidence, price_yes, price_no, size_usdc)
-  VALUES (@market_id, @market_end, @signal, @confidence, @price_yes, @price_no, @size_usdc)
+  INSERT INTO trades (market_id, market_end, signal, confidence, edge, price_yes, price_no, size_usdc)
+  VALUES (@market_id, @market_end, @signal, @confidence, @edge, @price_yes, @price_no, @size_usdc)
 `);
 
 const insertSnapshot = db.prepare<Snapshot>(`

@@ -17,7 +17,8 @@ export interface PaperTrade {
 export function executePaperTrade(
   market: PolyMarket5M,
   prediction: Prediction,
-  features: Features
+  features: Features,
+  edge: number
 ): PaperTrade {
   const tradeId = saveTrade(
     {
@@ -25,6 +26,7 @@ export function executePaperTrade(
       market_end: market.endDateIso,
       signal: prediction.signal,
       confidence: prediction.confidence,
+      edge: Math.round(edge * 10000) / 10000,
       price_yes: market.priceUp,   // "Up" outcome = YES
       price_no: market.priceDown,  // "Down" outcome = NO
       size_usdc: TRADE_SIZE_USDC,
@@ -43,7 +45,7 @@ export function executePaperTrade(
   );
 
   console.log(
-    `[PaperTrader] Trade #${tradeId} | ${prediction.signal} @ conf=${prediction.confidence} | ` +
+    `[PaperTrader] Trade #${tradeId} | ${prediction.signal} @ conf=${prediction.confidence} edge=${(edge*100).toFixed(1)}% | ` +
     `UP=${market.priceUp} DOWN=${market.priceDown} | ends ${market.endDateIso} | ${prediction.reason}`
   );
 

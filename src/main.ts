@@ -11,6 +11,7 @@ import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/tr
 const TICK_INTERVAL_MS = 60_000;       // Run prediction loop every 1 minute
 const SETTLE_INTERVAL_MS = 2 * 60_000; // Check settlements every 2 minutes
 const WARMUP_MS = 10_000;              // Wait for WS data before first tick
+const MIN_EDGE = 0.04;                 // Minimum edge = 4% (confidence - breakeven price)
 
 async function tick(): Promise<void> {
   try {
@@ -53,8 +54,20 @@ async function tick(): Promise<void> {
       return;
     }
 
+    // 6b. Edge check: confidence must exceed contract breakeven price by MIN_EDGE
+    // breakeven = price of the token we're buying (YES for UP, NO for DOWN)
+    const betPrice = prediction.signal === 'UP' ? market.priceUp : market.priceDown;
+    const edge = prediction.confidence - betPrice;
+    if (edge < MIN_EDGE) {
+      console.log(
+        `[Bot] SKIP: edge=${(edge * 100).toFixed(1)}% < ${MIN_EDGE * 100}% ` +
+        `(conf=${prediction.confidence} breakeven=${betPrice} signal=${prediction.signal})`
+      );
+      return;
+    }
+
     // 7. Execute paper trade
-    executePaperTrade(market, prediction, features);
+    executePaperTrade(market, prediction, features, edge);
 
   } catch (err) {
     console.error('[Bot] Tick error:', err);
