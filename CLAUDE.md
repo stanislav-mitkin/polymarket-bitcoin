@@ -49,11 +49,17 @@ writes `data/regime.json`. The bot reads that file every tick:
   `realizedEdge7d < -2% AND n7d >= 20`. Settlements and retraining keep running
   so the bot recovers once the report no longer flags a loss.
 
-Cron setup on the server (daily at 00:05 UTC):
+Cron setup on the server (daily at 00:05 UTC). Project path on the Vultr
+server is `/root/polymarket-bitcoin`. Resolve the `node` binary first
+(`which node`) — cron runs in a minimal env without PATH/nvm init, so an
+absolute path is required:
+
 ```bash
-crontab -e
-# Add:
-5 0 * * * cd /root/polymarket && /usr/bin/node dist/scripts/regime-report.js >> logs/regime.log 2>&1
+mkdir -p /root/polymarket-bitcoin/logs
+NODE_BIN=$(which node)
+(crontab -l 2>/dev/null; echo "5 0 * * * cd /root/polymarket-bitcoin && $NODE_BIN dist/scripts/regime-report.js >> logs/regime.log 2>&1") | crontab -
+crontab -l                                   # verify
+cd /root/polymarket-bitcoin && npm run report  # seed regime.json immediately
 ```
 
 The script is idempotent and read-only against `trades`. Safe to invoke
