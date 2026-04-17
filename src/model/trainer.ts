@@ -6,6 +6,7 @@ import {
   FEATURE_NAMES, NUM_FEATURES,
   type LRModel, type RawRow,
 } from './logistic-regression';
+import { loadRegime, clearForceRetrain } from './regime';
 
 export type { LRModel };
 
@@ -13,6 +14,7 @@ export type { LRModel };
 
 export const MIN_TRADES_FOR_TRAINING = 50;   // first retrain threshold
 export const RETRAIN_EVERY = 25;             // retrain every N new settled trades
+const DEFAULT_HALFLIFE_DAYS = 7;             // sample weight = 0.5 at this age (overridable by regime)
 
 const MODEL_PATH = path.join(process.cwd(), 'data', 'model.json');
 
@@ -36,13 +38,15 @@ export function loadModel(): LRModel | null {
 
 interface DBRow extends RawRow {
   outcome: 'UP' | 'DOWN';
+  settled_at: string;
 }
 
-function loadTrainingData(): { X: number[][]; y: number[] } | null {
+function loadTrainingData(halflifeDays: number): { X: number[][]; y: number[]; weights: number[] } | null {
   const rows = db.prepare(`
-    SELECT t.outcome,
+    SELECT t.outcome, t.settled_at,
            s.obi, s.tfi, s.rsi, s.macd, s.atr,
-           s.oi_delta, s.funding_rate, s.spread
+           s.oi_delta, s.funding_rate, s.spread,
+           s.volume_delta, s.btc_trend_1h
     FROM trades t
     JOIN snapshots s ON s.trade_id = t.id
     WHERE t.outcome IS NOT NULL
@@ -53,18 +57,28 @@ function loadTrainingData(): { X: number[][]; y: number[] } | null {
 
   if (rows.length < MIN_TRADES_FOR_TRAINING) return null;
 
+  // Time-weighted samples: exp(-age_days / halflife * ln2)
+  // Most recent trade = 1.0, trade at halflife age = 0.5, etc.
+  const now = Date.now();
+  const ln2 = Math.log(2);
+  const weights = rows.map(r => {
+    const ageMs = now - new Date(r.settled_at).getTime();
+    const ageDays = Math.max(0, ageMs / (24 * 60 * 60 * 1000));
+    return Math.exp(-ageDays / halflifeDays * ln2);
+  });
+
   const X = rows.map(r => extractFeatures(r));
   const y = rows.map(r => r.outcome === 'UP' ? 1 : 0);
 
-  return { X, y };
+  return { X, y, weights };
 }
 
 // ─── Train/val split (time-ordered, no shuffle) ───────────────────────────────
 
-function splitData(X: number[][], y: number[], valFrac = 0.2) {
+function splitData(X: number[][], y: number[], weights: number[], valFrac = 0.2) {
   const splitIdx = Math.floor(X.length * (1 - valFrac));
   return {
-    XTrain: X.slice(0, splitIdx), yTrain: y.slice(0, splitIdx),
+    XTrain: X.slice(0, splitIdx), yTrain: y.slice(0, splitIdx), wTrain: weights.slice(0, splitIdx),
     XVal:   X.slice(splitIdx),    yVal:   y.slice(splitIdx),
   };
 }
@@ -91,30 +105,35 @@ export function maybeRetrain(): boolean {
     return false;
   }
 
-  // Check if a retrain is due
+  const regime = loadRegime();
+  const halflife = regime?.recommendedHalflife ?? DEFAULT_HALFLIFE_DAYS;
+  const forceRetrain = regime?.forceRetrain === true;
+
+  // Check if a retrain is due (bypassed when regime shift demands it)
   const existing = loadModel();
-  if (existing) {
+  if (existing && !forceRetrain) {
     const newSince = settledCount - existing.trainingSamples;
     if (newSince < RETRAIN_EVERY) return false; // not enough new data
   }
 
-  const data = loadTrainingData();
+  const data = loadTrainingData(halflife);
   if (!data) return false;
 
-  const { X, y } = data;
-  const { XTrain, yTrain, XVal, yVal } = splitData(X, y);
+  const { X, y, weights: sampleWeights } = data;
+  const { XTrain, yTrain, wTrain, XVal, yVal } = splitData(X, y, sampleWeights);
 
   // Normalise (fit only on train set to avoid data leakage)
   const normStats = fitNorm(XTrain);
   const XTrainNorm = applyNorm(XTrain, normStats);
   const XValNorm   = applyNorm(XVal,   normStats);
 
-  // Train
+  // Train with time-weighted samples (recent trades get higher influence)
   const t0 = Date.now();
   const { weights, bias } = trainLogisticRegression(XTrainNorm, yTrain, {
     lr: 0.1,
     epochs: 1000,
     lambda: 0.01,
+    sampleWeights: wTrain,
   });
 
   // Evaluate
@@ -146,9 +165,13 @@ export function maybeRetrain(): boolean {
 
   saveModel(model);
 
+  // Consume the forceRetrain flag — we just honored it.
+  if (forceRetrain) clearForceRetrain();
+
   console.log(
     `[Trainer] ✓ Retrained in ${Date.now() - t0}ms | ` +
     `samples=${X.length} (train=${XTrain.length}, val=${XVal.length}) | ` +
+    `halflife=${halflife}d${forceRetrain ? ' (forced by regime shift)' : ''} | ` +
     `train_acc=${(train.accuracy * 100).toFixed(1)}% val_acc=${(val.accuracy * 100).toFixed(1)}%`
   );
   console.log(

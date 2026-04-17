@@ -40,6 +40,8 @@ export function executePaperTrade(
       rsi: features.rsi,
       macd: features.macdHist,
       atr: features.atr,
+      volume_delta: features.volumeDelta,
+      btc_trend_1h: features.btcTrend1h,
       btc_price: features.btcPrice,
     }
   );

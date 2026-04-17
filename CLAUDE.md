@@ -28,7 +28,36 @@ lsof -ti :3000 | xargs kill -9
 # Check DB directly
 sqlite3 data/trades.db "SELECT * FROM trades ORDER BY created_at DESC LIMIT 5;"
 sqlite3 data/trades.db "SELECT outcome, count(*) FROM trades GROUP BY outcome;"
+
+# Regime / performance report (ad-hoc or via cron)
+npm run report          # compiled build
+npm run report:dev      # tsx, no build step
 ```
+
+---
+
+## Regime-aware adaptation
+
+`scripts/regime-report.ts` aggregates trade outcomes over 7d / 30d windows and
+writes `data/regime.json`. The bot reads that file every tick:
+
+- `recommendedHalflife` → trainer uses it as the recency decay halflife (default
+  7d, drops to 3d when a regime shift is detected: `|wr7d - wr30d| > 8pp`).
+- `forceRetrain` → trainer bypasses the usual "+25 new trades" gate and
+  retrains immediately; cleared by the trainer after it honors the flag.
+- `pauseTrading` → `main.ts` stops opening new trades while
+  `realizedEdge7d < -2% AND n7d >= 20`. Settlements and retraining keep running
+  so the bot recovers once the report no longer flags a loss.
+
+Cron setup on the server (daily at 00:05 UTC):
+```bash
+crontab -e
+# Add:
+5 0 * * * cd /root/polymarket && /usr/bin/node dist/scripts/regime-report.js >> logs/regime.log 2>&1
+```
+
+The script is idempotent and read-only against `trades`. Safe to invoke
+manually at any time for a fresh snapshot.
 
 ---
 
@@ -47,7 +76,10 @@ src/
 ├── model/
 │   ├── logistic-regression.ts # Pure TS LR: gradient descent + L2 regularization
 │   ├── trainer.ts             # Auto-retraining (50 trades to activate, every 25 after)
-│   └── predictor.ts           # Rule-based OR ML signal, hard-veto rules always active
+│   ├── predictor.ts           # Rule-based OR ML signal, hard-veto rules always active
+│   └── regime.ts              # Regime state I/O (data/regime.json)
+├── scripts/
+│   └── regime-report.ts       # Daily cron: detect regime shifts → writes data/regime.json
 ├── db/
 │   └── database.ts            # SQLite schema + all queries
 └── dashboard/

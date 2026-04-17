@@ -9,7 +9,7 @@ import {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const CONFIDENCE_THRESHOLD = 0.65;    // baseline — below this is near-random (50.7% WR on 203 trades)
-const CONFIDENCE_THRESHOLD_UP = 0.72; // UP needs stronger signal — 154 trades at 48.1% WR, -$36.60
+const CONFIDENCE_THRESHOLD_UP = 0.65; // same as DOWN — UP now profitable (52% WR) after BTC uptrend
 const CONFIDENCE_MAX = 0.85;          // cap — overconfident trades: 38.5% WR, -$13.65
 export const TRADE_SIZE_USDC = 10;
 
@@ -103,12 +103,19 @@ export function predict(f: Features): Prediction | null {
 
   const macdScore = clamp(f.macdHist / Math.max(f.atr, 1) * 2, -1, 1);
   votes.push({ label: 'MACD',     weight: 0.8,  score: macdScore });
-  votes.push({ label: 'Funding',  weight: 1.5,  score: -clamp(f.fundingRate / 0.05, -1, 1) });
+
+  // Funding: ML top feature (weight +0.247). Positive funding = longs overpaying = bearish pressure.
+  // Negative funding = shorts overpaying = bullish pressure. Weight raised to match ML importance.
+  votes.push({ label: 'Funding',  weight: 2.5,  score: -clamp(f.fundingRate / 0.05, -1, 1) });
 
   const oiSign  = Math.sign(f.tfi);
   const oiScore = oiSign * clamp(Math.abs(f.oiDelta) / 1, 0, 1);
   votes.push({ label: 'OI_delta', weight: 1.0,  score: oiScore });
   votes.push({ label: 'VolDelta', weight: 1.0,  score: f.volumeDelta });
+
+  // BTC 1h trend — regime signal. Positive trend supports UP, negative supports DOWN.
+  // Scale: ±5% trend → ±1.0 score. Weight 2.0 — meaningful but not dominant (avoids pure momentum chase).
+  votes.push({ label: 'Trend',    weight: 2.0,  score: clamp(f.btcTrend1h * 20, -1, 1) });
 
   const totalWeight   = votes.reduce((s, v) => s + v.weight, 0);
   const weightedScore = votes.reduce((s, v) => s + v.weight * v.score, 0) / totalWeight;
@@ -125,6 +132,7 @@ export function predict(f: Features): Prediction | null {
       funding_rate: f.fundingRate,
       spread: f.spread,
       volume_delta: f.volumeDelta,
+      btc_trend_1h: f.btcTrend1h,
     });
     const xNorm = normSingle(rawX, mlModel.normStats);
     const prob  = predictProba(mlModel.weights, mlModel.bias, xNorm);

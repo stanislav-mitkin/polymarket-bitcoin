@@ -7,7 +7,9 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsc && cp -r src/dashboard/public dist/dashboard/public",
     "start": "node dist/main.js",
-    "dashboard": "tsx src/dashboard/server.ts"
+    "dashboard": "tsx src/dashboard/server.ts",
+    "report": "node dist/scripts/regime-report.js",
+    "report:dev": "tsx src/scripts/regime-report.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.1",

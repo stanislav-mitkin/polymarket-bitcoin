@@ -7,6 +7,7 @@ import { settleExpiredTrades } from './bot/settler';
 import { startDashboard } from './dashboard/server';
 import { hasTradeForMarket } from './db/database';
 import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/trainer';
+import { loadRegime } from './model/regime';
 
 const TICK_INTERVAL_MS = 60_000;       // Run prediction loop every 1 minute
 const SETTLE_INTERVAL_MS = 2 * 60_000; // Check settlements every 2 minutes
@@ -21,6 +22,19 @@ async function tick(): Promise<void> {
     // 1b. Auto-retrain if enough new data has accumulated
     const retrained = maybeRetrain();
     if (retrained) reloadModel();
+
+    // 1c. Circuit breaker — pause new trades when recent performance is bad.
+    // Settlements and retraining still run above so we keep collecting data.
+    const regime = loadRegime();
+    if (regime?.pauseTrading) {
+      console.log(
+        `[Bot] PAUSE: regime=${regime.reason} ` +
+        `(wr7d=${regime.wr7d !== null ? (regime.wr7d * 100).toFixed(1) + '%' : 'n/a'}, ` +
+        `edge7d=${regime.realizedEdge7d !== null ? (regime.realizedEdge7d * 100).toFixed(1) + '%' : 'n/a'}, ` +
+        `n7d=${regime.n7d})`
+      );
+      return;
+    }
 
     // 2. Find the next active market
     const market = await getNextMarket();

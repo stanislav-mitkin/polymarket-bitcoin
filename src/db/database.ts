@@ -37,12 +37,16 @@ db.exec(`
     rsi             REAL,
     macd            REAL,
     atr             REAL,
+    volume_delta    REAL,
+    btc_trend_1h    REAL,
     btc_price       REAL
   );
 `);
 
-// Add edge column to existing DBs (safe to run repeatedly — fails silently if column exists)
+// Schema migrations — ALTER TABLE ADD COLUMN is idempotent-safe via try/catch
 try { db.exec('ALTER TABLE trades ADD COLUMN edge REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE snapshots ADD COLUMN volume_delta REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE snapshots ADD COLUMN btc_trend_1h REAL'); } catch (_) {}
 
 export interface Trade {
   id?: number;
@@ -70,6 +74,8 @@ export interface Snapshot {
   rsi?: number;
   macd?: number;
   atr?: number;
+  volume_delta?: number;
+  btc_trend_1h?: number;
   btc_price?: number;
 }
 
@@ -90,8 +96,8 @@ const insertTrade = db.prepare<Trade>(`
 `);
 
 const insertSnapshot = db.prepare<Snapshot>(`
-  INSERT INTO snapshots (trade_id, obi, tfi, spread, funding_rate, oi_delta, rsi, macd, atr, btc_price)
-  VALUES (@trade_id, @obi, @tfi, @spread, @funding_rate, @oi_delta, @rsi, @macd, @atr, @btc_price)
+  INSERT INTO snapshots (trade_id, obi, tfi, spread, funding_rate, oi_delta, rsi, macd, atr, volume_delta, btc_trend_1h, btc_price)
+  VALUES (@trade_id, @obi, @tfi, @spread, @funding_rate, @oi_delta, @rsi, @macd, @atr, @volume_delta, @btc_trend_1h, @btc_price)
 `);
 
 const settleTrade = db.prepare<{ outcome: string; pnl: number; id: number }>(`

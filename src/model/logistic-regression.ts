@@ -11,9 +11,10 @@ export const FEATURE_NAMES = [
   'vol_delta',      // volumeDelta
   'spread',         // bid-ask spread in USD
   'obi_tfi',        // obi × tfi synergy
+  'btc_trend_1h',   // BTC return over last 60 min (regime signal)
 ] as const;
 
-export const NUM_FEATURES = FEATURE_NAMES.length; // 9
+export const NUM_FEATURES = FEATURE_NAMES.length; // 10
 
 export interface NormStats {
   mean: number[];
@@ -48,6 +49,7 @@ export interface RawRow {
   funding_rate: number;
   spread: number;
   volume_delta?: number;
+  btc_trend_1h?: number;  // optional — NULL for historical rows before this column existed
 }
 
 export function extractFeatures(row: RawRow): number[] {
@@ -62,6 +64,7 @@ export function extractFeatures(row: RawRow): number[] {
     clamp(row.volume_delta ?? 0, -1, 1),
     Math.min(row.spread, 100),
     clamp(row.obi * row.tfi, -1, 1),
+    clamp((row.btc_trend_1h ?? 0) * 20, -1, 1), // scale: ±5% trend → ±1.0
   ];
 }
 
@@ -111,19 +114,29 @@ function binaryCrossEntropy(y: number[], probs: number[]): number {
 // ── Training ──────────────────────────────────────────────────────────────────
 
 export interface TrainOpts {
-  lr?: number;      // learning rate  (default 0.1)
-  epochs?: number;  // gradient steps (default 1000)
-  lambda?: number;  // L2 coefficient (default 0.01)
+  lr?: number;               // learning rate  (default 0.1)
+  epochs?: number;           // gradient steps (default 1000)
+  lambda?: number;           // L2 coefficient (default 0.01)
+  sampleWeights?: number[];  // per-sample weights, length = N (default: all 1.0)
 }
 
+/**
+ * Trains binary logistic regression via gradient descent with L2 regularisation.
+ * Optionally accepts `sampleWeights` to weight each training sample — useful for
+ * giving recent trades more influence than old ones (market regime adaptation).
+ */
 export function trainLogisticRegression(
   X: number[][],
   y: number[],
   opts: TrainOpts = {}
 ): { weights: number[]; bias: number } {
-  const { lr = 0.1, epochs = 1000, lambda = 0.01 } = opts;
+  const { lr = 0.1, epochs = 1000, lambda = 0.01, sampleWeights } = opts;
   const N = X.length;
   const D = X[0].length;
+
+  // Default weights = 1.0 for every sample
+  const wSample = sampleWeights ?? new Array(N).fill(1);
+  const totalWeight = wSample.reduce((s, v) => s + v, 0);
 
   const w = new Array(D).fill(0);
   let b = 0;
@@ -134,15 +147,15 @@ export function trainLogisticRegression(
 
     for (let i = 0; i < N; i++) {
       const p = sigmoid(dot(w, X[i]) + b);
-      const err = p - y[i];
+      const err = (p - y[i]) * wSample[i]; // weighted error
       for (let j = 0; j < D; j++) dw[j] += err * X[i][j];
       db += err;
     }
 
     for (let j = 0; j < D; j++) {
-      w[j] -= lr * (dw[j] / N + lambda * w[j]); // gradient + L2
+      w[j] -= lr * (dw[j] / totalWeight + lambda * w[j]); // gradient + L2
     }
-    b -= lr * (db / N); // bias: no L2 penalty
+    b -= lr * (db / totalWeight); // bias: no L2 penalty
   }
 
   return { weights: w, bias: b };
