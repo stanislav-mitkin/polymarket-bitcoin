@@ -4,7 +4,7 @@ import { getNextMarket } from './bot/polymarket';
 import { predict, reloadModel, getModelInfo } from './model/predictor';
 import { settleExpiredTrades } from './bot/settler';
 import { startDashboard } from './dashboard/server';
-import { hasTradeForMarket } from './db/database';
+import { countOpenTrades, getConsecutiveLosses, getDailyRealizedPnl, hasTradeForMarket } from './db/database';
 import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/trainer';
 import { loadRegime } from './model/regime';
 import { loadTradingConfig } from './config/trading';
@@ -16,11 +16,22 @@ const WARMUP_MS = 10_000;              // Wait for WS data before first tick
 const MIN_EDGE = 0.04;                 // Minimum edge = 4% (confidence - breakeven price)
 const tradingConfig = loadTradingConfig();
 const tradeExecutor = createTradeExecutor(tradingConfig);
+let consecutiveTickErrors = 0;
 
 async function tick(): Promise<void> {
+  if (consecutiveTickErrors >= tradingConfig.risk.maxConsecutiveTickErrors) {
+    console.error(
+      `[Bot] KILL-SWITCH: consecutive tick errors=${consecutiveTickErrors} ` +
+      `>= ${tradingConfig.risk.maxConsecutiveTickErrors}. Restart required.`
+    );
+    return;
+  }
+
+  let tickFailed = false;
   try {
     // 1. Settle any expired trades first
     await settleExpiredTrades();
+    await tradeExecutor.reconcileOpenTrades?.();
 
     // 1b. Auto-retrain if enough new data has accumulated
     const retrained = maybeRetrain();
@@ -35,6 +46,27 @@ async function tick(): Promise<void> {
         `(wr7d=${regime.wr7d !== null ? (regime.wr7d * 100).toFixed(1) + '%' : 'n/a'}, ` +
         `edge7d=${regime.realizedEdge7d !== null ? (regime.realizedEdge7d * 100).toFixed(1) + '%' : 'n/a'}, ` +
         `n7d=${regime.n7d})`
+      );
+      return;
+    }
+
+    // 1d. Risk limits
+    const openTrades = countOpenTrades();
+    if (openTrades >= tradingConfig.risk.maxOpenPositions) {
+      console.log(`[Bot] RISK: open positions=${openTrades} >= ${tradingConfig.risk.maxOpenPositions}, skipping new trade`);
+      return;
+    }
+    const dailyPnl = getDailyRealizedPnl();
+    if (dailyPnl <= -Math.abs(tradingConfig.risk.maxDailyLossUsdc)) {
+      console.log(
+        `[Bot] RISK: daily pnl=${dailyPnl.toFixed(2)} <= -${Math.abs(tradingConfig.risk.maxDailyLossUsdc).toFixed(2)}, pause new trades`
+      );
+      return;
+    }
+    const consecutiveLosses = getConsecutiveLosses();
+    if (consecutiveLosses >= tradingConfig.risk.maxConsecutiveLosses) {
+      console.log(
+        `[Bot] RISK: consecutive losses=${consecutiveLosses} >= ${tradingConfig.risk.maxConsecutiveLosses}, pause new trades`
       );
       return;
     }
@@ -91,9 +123,15 @@ async function tick(): Promise<void> {
       edge,
       sizeUsdc: tradingConfig.tradeSizeUsdc,
     });
-
   } catch (err) {
+    tickFailed = true;
+    consecutiveTickErrors += 1;
     console.error('[Bot] Tick error:', err);
+    console.error(
+      `[Bot] Tick error streak=${consecutiveTickErrors}/${tradingConfig.risk.maxConsecutiveTickErrors}`
+    );
+  } finally {
+    if (!tickFailed) consecutiveTickErrors = 0;
   }
 }
 
@@ -134,6 +172,12 @@ async function main(): Promise<void> {
     console.log(`[Bot] Rule-based mode (ML activates after ${MIN_TRADES_FOR_TRAINING} settled trades, retrains every ${RETRAIN_EVERY})`);
   }
   console.log(`[Bot] Trading mode=${tradingConfig.mode} | tradeSize=$${tradingConfig.tradeSizeUsdc.toFixed(2)}`);
+  console.log(
+    `[Bot] Risk limits | maxOpen=${tradingConfig.risk.maxOpenPositions} ` +
+    `maxDailyLoss=$${tradingConfig.risk.maxDailyLossUsdc.toFixed(2)} ` +
+    `maxConsecLoss=${tradingConfig.risk.maxConsecutiveLosses} ` +
+    `maxTickErr=${tradingConfig.risk.maxConsecutiveTickErrors}`
+  );
   if (tradingConfig.mode === 'live') {
     console.log(`[Bot] Live dry-run=${tradingConfig.live.dryRun} | host=${tradingConfig.live.host}`);
   }

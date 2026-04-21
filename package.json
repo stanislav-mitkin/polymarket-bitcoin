@@ -9,7 +9,9 @@
     "start": "node dist/main.js",
     "dashboard": "tsx src/dashboard/server.ts",
     "report": "node dist/scripts/regime-report.js",
-    "report:dev": "tsx src/scripts/regime-report.ts"
+    "report:dev": "tsx src/scripts/regime-report.ts",
+    "audit:live": "node dist/scripts/live-reconciliation-audit.js",
+    "audit:live:dev": "tsx src/scripts/live-reconciliation-audit.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.1",

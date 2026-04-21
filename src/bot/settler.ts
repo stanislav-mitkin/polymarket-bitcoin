@@ -19,23 +19,13 @@ export async function settleExpiredTrades(): Promise<void> {
         continue;
       }
 
-      settleTradeById(
-        trade.id!,
-        outcome,
-        trade.price_yes,
-        trade.price_no,
-        trade.size_usdc,
-        trade.signal
-      );
-
-      const won = outcome === trade.signal;
-      const pnl = won
-        ? trade.size_usdc * (1 - (trade.signal === 'UP' ? trade.price_yes : trade.price_no))
-        : -trade.size_usdc * (trade.signal === 'UP' ? trade.price_yes : trade.price_no);
+      const settled = settleTradeById(trade.id!, outcome);
 
       console.log(
         `[Settler] Trade #${trade.id} settled | signal=${trade.signal} outcome=${outcome} ` +
-        `${won ? '✓ WIN' : '✗ LOSS'} | P&L=${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDC`
+        `${settled.won ? '✓ WIN' : '✗ LOSS'} | mode=${settled.mode} | ` +
+        `P&L=${settled.pnl > 0 ? '+' : ''}${settled.pnl.toFixed(2)} USDC ` +
+        `(entry=${settled.entryPrice.toFixed(4)} shares=${settled.shares.toFixed(4)} fees=${settled.feesUsdc.toFixed(4)})`
       );
     } catch (err) {
       console.error(`[Settler] Error settling trade #${trade.id}:`, err);

@@ -18,6 +18,16 @@ db.exec(`
     signal        TEXT NOT NULL CHECK (signal IN ('UP', 'DOWN')),
     confidence    REAL NOT NULL,
     edge          REAL,
+    mode          TEXT NOT NULL DEFAULT 'paper' CHECK (mode IN ('paper', 'live')),
+    live_order_id TEXT,
+    live_status   TEXT,
+    live_error    TEXT,
+    requested_price REAL,
+    requested_size  REAL,
+    filled_price    REAL,
+    filled_size     REAL,
+    fees_usdc       REAL,
+    live_updated_at TEXT,
     price_yes     REAL NOT NULL,
     price_no      REAL NOT NULL,
     size_usdc     REAL NOT NULL DEFAULT 10,
@@ -45,8 +55,24 @@ db.exec(`
 
 // Schema migrations — ALTER TABLE ADD COLUMN is idempotent-safe via try/catch
 try { db.exec('ALTER TABLE trades ADD COLUMN edge REAL'); } catch (_) {}
+try { db.exec(`ALTER TABLE trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper' CHECK (mode IN ('paper','live'))`); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN live_order_id TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN live_status TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN live_error TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN requested_price REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN requested_size REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN filled_price REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN filled_size REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN fees_usdc REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE trades ADD COLUMN live_updated_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE snapshots ADD COLUMN volume_delta REAL'); } catch (_) {}
 try { db.exec('ALTER TABLE snapshots ADD COLUMN btc_trend_1h REAL'); } catch (_) {}
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_trades_outcome_market_end ON trades(outcome, market_end);
+  CREATE INDEX IF NOT EXISTS idx_trades_mode_status ON trades(mode, live_status);
+  CREATE INDEX IF NOT EXISTS idx_trades_settled_at ON trades(settled_at);
+`);
 
 export interface Trade {
   id?: number;
@@ -56,6 +82,16 @@ export interface Trade {
   signal: 'UP' | 'DOWN';
   confidence: number;
   edge?: number | null;
+  mode?: 'paper' | 'live';
+  live_order_id?: string | null;
+  live_status?: string | null;
+  live_error?: string | null;
+  requested_price?: number | null;
+  requested_size?: number | null;
+  filled_price?: number | null;
+  filled_size?: number | null;
+  fees_usdc?: number | null;
+  live_updated_at?: string | null;
   price_yes: number;
   price_no: number;
   size_usdc: number;
@@ -91,8 +127,16 @@ export interface TradeStats {
 }
 
 const insertTrade = db.prepare<Trade>(`
-  INSERT INTO trades (market_id, market_end, signal, confidence, edge, price_yes, price_no, size_usdc)
-  VALUES (@market_id, @market_end, @signal, @confidence, @edge, @price_yes, @price_no, @size_usdc)
+  INSERT INTO trades (
+    market_id, market_end, signal, confidence, edge,
+    mode, live_order_id, live_status, live_error, requested_price, requested_size, filled_price, filled_size, fees_usdc, live_updated_at,
+    price_yes, price_no, size_usdc
+  )
+  VALUES (
+    @market_id, @market_end, @signal, @confidence, @edge,
+    @mode, @live_order_id, @live_status, @live_error, @requested_price, @requested_size, @filled_price, @filled_size, @fees_usdc, @live_updated_at,
+    @price_yes, @price_no, @size_usdc
+  )
 `);
 
 const insertSnapshot = db.prepare<Snapshot>(`
@@ -105,27 +149,202 @@ const settleTrade = db.prepare<{ outcome: string; pnl: number; id: number }>(`
   WHERE id = @id
 `);
 
+const getTradeByIdStmt = db.prepare('SELECT * FROM trades WHERE id = ? LIMIT 1');
+const updateTradePnlStmt = db.prepare<{ id: number; pnl: number }>(`
+  UPDATE trades SET pnl = @pnl WHERE id = @id
+`);
+
 export function saveTrade(trade: Trade, snapshot: Omit<Snapshot, 'trade_id'>): number {
-  const result = insertTrade.run(trade);
+  const result = insertTrade.run({
+    mode: 'paper',
+    live_order_id: null,
+    live_status: null,
+    live_error: null,
+    requested_price: null,
+    requested_size: null,
+    filled_price: null,
+    filled_size: null,
+    fees_usdc: null,
+    live_updated_at: null,
+    ...trade,
+  });
   const tradeId = result.lastInsertRowid as number;
   insertSnapshot.run({ trade_id: tradeId, ...snapshot });
   return tradeId;
 }
 
-export function settleTradeById(id: number, outcome: 'UP' | 'DOWN', entryPriceYes: number, entryPriceNo: number, sizeUsdc: number, signal: 'UP' | 'DOWN'): void {
-  // P&L calculation:
-  // If we bet UP and outcome is UP: we bought YES at price_yes, it settles at 1.0
-  // If we bet UP and outcome is DOWN: we lose what we paid
-  const won = outcome === signal;
-  const entryPrice = signal === 'UP' ? entryPriceYes : entryPriceNo;
-  const pnl = won ? sizeUsdc * (1 - entryPrice) : -sizeUsdc * entryPrice;
+export interface SettlementResult {
+  pnl: number;
+  won: boolean;
+  mode: 'paper' | 'live';
+  entryPrice: number;
+  shares: number;
+  costUsdc: number;
+  feesUsdc: number;
+}
 
-  settleTrade.run({ outcome, pnl: Math.round(pnl * 100) / 100, id });
+export function settleTradeById(id: number, outcome: 'UP' | 'DOWN'): SettlementResult {
+  const trade = getTradeByIdStmt.get(id) as Trade | undefined;
+  if (!trade) throw new Error(`Trade not found: id=${id}`);
+
+  const result = computeSettlement(trade, outcome);
+  settleTrade.run({ outcome, pnl: result.pnl, id });
+  return result;
+}
+
+export function recomputeSettledTradePnlById(id: number): SettlementResult | null {
+  const trade = getTradeByIdStmt.get(id) as Trade | undefined;
+  if (!trade || !trade.outcome) return null;
+  const result = computeSettlement(trade, trade.outcome);
+  updateTradePnlStmt.run({ id, pnl: result.pnl });
+  return result;
 }
 
 export function hasTradeForMarket(marketId: string): boolean {
   const row = db.prepare('SELECT 1 FROM trades WHERE market_id = ? LIMIT 1').get(marketId);
   return row != null;
+}
+
+export function countOpenTrades(): number {
+  const row = db.prepare(
+    `SELECT COUNT(*) AS n FROM trades WHERE outcome IS NULL`
+  ).get() as { n: number };
+  return row.n ?? 0;
+}
+
+export function getDailyRealizedPnl(): number {
+  const row = db.prepare(
+    `SELECT ROUND(COALESCE(SUM(pnl), 0), 6) AS pnl FROM trades WHERE settled_at IS NOT NULL AND date(settled_at) = date('now')`
+  ).get() as { pnl: number | null };
+  return row.pnl ?? 0;
+}
+
+export function getConsecutiveLosses(): number {
+  const rows = db.prepare(
+    `SELECT signal, outcome FROM trades WHERE outcome IS NOT NULL ORDER BY datetime(settled_at) DESC, id DESC LIMIT 200`
+  ).all() as Array<{ signal: 'UP' | 'DOWN'; outcome: 'UP' | 'DOWN' }>;
+
+  let losses = 0;
+  for (const row of rows) {
+    if (row.signal === row.outcome) break;
+    losses += 1;
+  }
+  return losses;
+}
+
+export type LiveTradeReconcileRow = Pick<
+  Trade,
+  'id' | 'market_id' | 'live_order_id' | 'live_status' | 'mode' | 'outcome'
+>;
+
+export function getLiveTradesToReconcile(limit = 30): LiveTradeReconcileRow[] {
+  return db.prepare(
+    `
+      SELECT id, market_id, live_order_id, live_status, mode, outcome
+      FROM trades
+      WHERE
+        mode = 'live'
+        AND outcome IS NULL
+        AND live_order_id IS NOT NULL
+        AND (
+          live_status IS NULL OR upper(live_status) NOT IN ('FILLED', 'CANCELED', 'CANCELLED', 'REJECTED', 'FAILED')
+        )
+      ORDER BY created_at DESC
+      LIMIT ?
+    `
+  ).all(limit) as LiveTradeReconcileRow[];
+}
+
+export function updateLiveTradeMetaById(
+  id: number,
+  patch: {
+    live_status?: string | null;
+    live_error?: string | null;
+    filled_price?: number | null;
+    filled_size?: number | null;
+    fees_usdc?: number | null;
+  }
+): void {
+  db.prepare(
+    `
+      UPDATE trades
+      SET
+        live_status = COALESCE(@live_status, live_status),
+        live_error = @live_error,
+        filled_price = COALESCE(@filled_price, filled_price),
+        filled_size = COALESCE(@filled_size, filled_size),
+        fees_usdc = COALESCE(@fees_usdc, fees_usdc),
+        live_updated_at = datetime('now')
+      WHERE id = @id
+    `
+  ).run({
+    id,
+    live_status: patch.live_status ?? null,
+    live_error: patch.live_error ?? null,
+    filled_price: patch.filled_price ?? null,
+    filled_size: patch.filled_size ?? null,
+    fees_usdc: patch.fees_usdc ?? null,
+  });
+}
+
+function computeSettlement(trade: Trade, outcome: 'UP' | 'DOWN'): SettlementResult {
+  const won = outcome === trade.signal;
+  const mode: 'paper' | 'live' = trade.mode === 'live' ? 'live' : 'paper';
+
+  if (mode === 'paper') {
+    const entryPrice = trade.signal === 'UP' ? trade.price_yes : trade.price_no;
+    const pnlRaw = won
+      ? trade.size_usdc * (1 - entryPrice)
+      : -trade.size_usdc * entryPrice;
+
+    return {
+      pnl: round2(pnlRaw),
+      won,
+      mode,
+      entryPrice,
+      shares: trade.size_usdc,
+      costUsdc: trade.size_usdc * entryPrice,
+      feesUsdc: 0,
+    };
+  }
+
+  const fallbackEntryPrice = trade.signal === 'UP' ? trade.price_yes : trade.price_no;
+  const entryPrice = positiveOrNull(trade.filled_price)
+    ?? positiveOrNull(trade.requested_price)
+    ?? fallbackEntryPrice;
+
+  const shares = positiveOrNull(trade.filled_size)
+    ?? positiveOrNull(trade.requested_size)
+    ?? (trade.size_usdc / Math.max(entryPrice, 0.0001));
+
+  const costUsdc = shares * entryPrice;
+  const feesUsdc = Math.max(0, trade.fees_usdc ?? 0);
+  const pnlRaw = won
+    ? shares - costUsdc - feesUsdc
+    : -costUsdc - feesUsdc;
+
+  return {
+    pnl: round2(pnlRaw),
+    won,
+    mode,
+    entryPrice,
+    shares: round6(shares),
+    costUsdc: round6(costUsdc),
+    feesUsdc: round6(feesUsdc),
+  };
+}
+
+function positiveOrNull(v: number | null | undefined): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return null;
+  return v;
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+function round6(v: number): number {
+  return Math.round(v * 1_000_000) / 1_000_000;
 }
 
 export function getUnsettledTrades(): Trade[] {

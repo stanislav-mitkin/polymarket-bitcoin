@@ -4,6 +4,7 @@ export interface TradingConfig {
   mode: TradingMode;
   tradeSizeUsdc: number;
   live: LiveTradingConfig;
+  risk: RiskConfig;
 }
 
 export interface LiveTradingConfig {
@@ -16,6 +17,13 @@ export interface LiveTradingConfig {
   funderAddress?: string;
   maxBuyPriceImpact: number;
   minOrderSizeBufferPct: number;
+}
+
+export interface RiskConfig {
+  maxOpenPositions: number;
+  maxDailyLossUsdc: number;
+  maxConsecutiveLosses: number;
+  maxConsecutiveTickErrors: number;
 }
 
 const DEFAULT_CLOB_HOST = 'https://clob.polymarket.com';
@@ -36,10 +44,16 @@ export function loadTradingConfig(): TradingConfig {
     maxBuyPriceImpact: parsePositiveNumber(process.env.LIVE_MAX_BUY_PRICE_IMPACT, 0.03, 'LIVE_MAX_BUY_PRICE_IMPACT'),
     minOrderSizeBufferPct: parsePositiveNumber(process.env.LIVE_MIN_ORDER_BUFFER_PCT, 0.05, 'LIVE_MIN_ORDER_BUFFER_PCT'),
   };
+  const risk: RiskConfig = {
+    maxOpenPositions: parsePositiveInteger(process.env.MAX_OPEN_POSITIONS, 1, 'MAX_OPEN_POSITIONS'),
+    maxDailyLossUsdc: parsePositiveNumber(process.env.MAX_DAILY_LOSS_USDC, 5, 'MAX_DAILY_LOSS_USDC'),
+    maxConsecutiveLosses: parsePositiveInteger(process.env.MAX_CONSECUTIVE_LOSSES, 4, 'MAX_CONSECUTIVE_LOSSES'),
+    maxConsecutiveTickErrors: parsePositiveInteger(process.env.MAX_CONSECUTIVE_TICK_ERRORS, 5, 'MAX_CONSECUTIVE_TICK_ERRORS'),
+  };
 
   if (mode === 'live') validateLiveConfig(live);
 
-  return { mode, tradeSizeUsdc, live };
+  return { mode, tradeSizeUsdc, live, risk };
 }
 
 function parseMode(raw: string | undefined): TradingMode {
@@ -75,6 +89,15 @@ function parsePositiveNumber(raw: string | undefined, fallback: number, envName:
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`Invalid ${envName}="${raw}". Expected a positive number.`);
+  }
+  return value;
+}
+
+function parsePositiveInteger(raw: string | undefined, fallback: number, envName: string): number {
+  if (!raw || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Invalid ${envName}="${raw}". Expected a positive integer.`);
   }
   return value;
 }

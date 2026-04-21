@@ -73,6 +73,8 @@ Dashboard: **http://localhost:3000**
 ```bash
 npm run build    # compile to dist/
 npm run start    # run compiled version (for production)
+npm run audit:live -- --limit=50         # read-only live reconciliation audit
+npm run audit:live -- --limit=50 --apply # apply fill/fee updates + recompute settled live pnl
 ```
 
 ### Trading Mode
@@ -93,7 +95,19 @@ POLY_CHAIN_ID=137
 POLY_PRIVATE_KEY=0x...
 POLY_SIGNATURE_TYPE=1
 POLY_FUNDER_ADDRESS=0x...
+
+# Risk guards
+MAX_OPEN_POSITIONS=1
+MAX_DAILY_LOSS_USDC=5
+MAX_CONSECUTIVE_LOSSES=4
+MAX_CONSECUTIVE_TICK_ERRORS=5
 ```
+
+Live execution notes:
+- Open live orders are reconciled in background via CLOB `getOrder` + `getTrades`.
+- `filled_price`, `filled_size`, and `fees_usdc` are persisted on the trade row.
+- Settlement P&L for `mode=live` is computed from reconciled fills (not from snapshot prices).
+- `fees_usdc` is currently estimated from `fee_rate_bps * fill_notional`; validate against exchange statements before scaling size.
 
 ---
 
@@ -269,5 +283,6 @@ Current demo results (as of initial testing):
 - [ ] Add liquidation cascade data from CoinGlass
 - [ ] Harden live trading mode (order lifecycle reconciliation + production safeguards)
 - [ ] Reconcile live fills/fees into exact P&L (currently DB entry prices are snapshot-based)
+- [ ] Validate estimated `fees_usdc` against exchange-reported net settlements and adjust formula if needed
 - [ ] Add Telegram/Discord alerts for trades and daily P&L summary
 - [ ] Backtest on historical Chainlink oracle data

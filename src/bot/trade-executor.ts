@@ -21,6 +21,7 @@ export interface TradeExecutionResult {
 
 export interface TradeExecutor {
   execute(input: TradeExecutionInput): Promise<TradeExecutionResult> | TradeExecutionResult;
+  reconcileOpenTrades?(): Promise<void> | void;
 }
 
 class PaperTraderExecutor implements TradeExecutor {

@@ -8,9 +8,10 @@ import {
   type BalanceAllowanceResponse,
   type ClobSigner,
   type TickSize,
+  type Trade as ClobTrade,
 } from '@polymarket/clob-client';
 import { Wallet } from 'ethers';
-import { saveTrade } from '../db/database';
+import { getLiveTradesToReconcile, saveTrade, updateLiveTradeMetaById } from '../db/database';
 import { type LiveTradingConfig } from '../config/trading';
 import { type TradeExecutionInput, type TradeExecutionResult, type TradeExecutor } from './trade-executor';
 
@@ -67,30 +68,43 @@ export class LiveTraderExecutor implements TradeExecutor {
     ensureEnoughCollateral(collateral, input.sizeUsdc);
 
     let externalOrderId: string | undefined;
+    let liveStatus = this.config.dryRun ? 'DRY_RUN' : 'PENDING_SUBMIT';
+    let liveError: string | null = null;
+    let filledPrice: number | null = null;
+    let filledSize: number | null = null;
     if (this.config.dryRun) {
       console.log(
         `[LiveTrader] DRY-RUN | market=${input.market.id} signal=${input.prediction.signal} ` +
         `amount=${input.sizeUsdc.toFixed(2)} token=${tokenId}`
       );
     } else {
-      const response = await client.createAndPostMarketOrder(
-        {
-          tokenID: tokenId,
-          amount: input.sizeUsdc,
-          side: Side.BUY,
-          price: buyPrice,
-        },
-        {
-          tickSize: orderBook.tick_size as TickSize,
-          negRisk: orderBook.neg_risk,
-        },
-        OrderType.FOK
-      );
-      externalOrderId = extractOrderId(response);
-      console.log(
-        `[LiveTrader] LIVE ORDER posted | market=${input.market.id} signal=${input.prediction.signal} ` +
-        `amount=${input.sizeUsdc.toFixed(2)} orderId=${externalOrderId ?? 'unknown'}`
-      );
+      try {
+        const response = await client.createAndPostMarketOrder(
+          {
+            tokenID: tokenId,
+            amount: input.sizeUsdc,
+            side: Side.BUY,
+            price: buyPrice,
+          },
+          {
+            tickSize: orderBook.tick_size as TickSize,
+            negRisk: orderBook.neg_risk,
+          },
+          OrderType.FOK
+        );
+        externalOrderId = extractOrderId(response);
+        liveStatus = extractOrderStatus(response) ?? 'POSTED';
+        filledPrice = extractFilledPrice(response);
+        filledSize = extractFilledSize(response);
+        console.log(
+          `[LiveTrader] LIVE ORDER posted | market=${input.market.id} signal=${input.prediction.signal} ` +
+          `amount=${input.sizeUsdc.toFixed(2)} orderId=${externalOrderId ?? 'unknown'} status=${liveStatus}`
+        );
+      } catch (err) {
+        liveStatus = 'FAILED';
+        liveError = String(err);
+        throw err;
+      }
     }
 
     const tradeId = saveTrade(
@@ -100,6 +114,16 @@ export class LiveTraderExecutor implements TradeExecutor {
         signal: input.prediction.signal,
         confidence: input.prediction.confidence,
         edge: Math.round(input.edge * 10000) / 10000,
+        mode: 'live',
+        live_order_id: externalOrderId ?? null,
+        live_status: liveStatus,
+        live_error: liveError,
+        requested_price: buyPrice,
+        requested_size: sizeShares,
+        filled_price: filledPrice,
+        filled_size: filledSize,
+        fees_usdc: null,
+        live_updated_at: new Date().toISOString(),
         price_yes: input.market.priceUp,
         price_no: input.market.priceDown,
         size_usdc: input.sizeUsdc,
@@ -138,6 +162,46 @@ export class LiveTraderExecutor implements TradeExecutor {
       },
       externalOrderId,
     };
+  }
+
+  async reconcileOpenTrades(): Promise<void> {
+    if (this.config.dryRun) return;
+
+    const rows = getLiveTradesToReconcile(30);
+    if (rows.length === 0) return;
+
+    const client = await this.getClient();
+    for (const row of rows) {
+      if (!row.id || !row.live_order_id) continue;
+      try {
+        const order = await client.getOrder(row.live_order_id);
+        const liveStatus = typeof order?.status === 'string' ? order.status.toUpperCase() : null;
+        let filledSize = parseNum(order?.size_matched);
+        let filledPrice = parseNum(order?.price);
+        let feesUsdc: number | null = null;
+
+        const trades = await client.getTrades({ market: row.market_id }, true);
+        const ownFills = trades.filter((t) => t.taker_order_id === row.live_order_id);
+        if (ownFills.length > 0) {
+          const aggregates = aggregateFills(ownFills);
+          filledSize = aggregates.totalSize > 0 ? aggregates.totalSize : filledSize;
+          filledPrice = aggregates.weightedPrice ?? filledPrice;
+          feesUsdc = aggregates.feesUsdcEstimate;
+        }
+
+        updateLiveTradeMetaById(row.id, {
+          live_status: liveStatus,
+          live_error: null,
+          filled_price: filledPrice,
+          filled_size: filledSize,
+          fees_usdc: feesUsdc,
+        });
+      } catch (err) {
+        updateLiveTradeMetaById(row.id, {
+          live_error: String(err),
+        });
+      }
+    }
   }
 
   private async getClient(): Promise<ClobClient> {
@@ -240,6 +304,67 @@ function extractOrderId(response: unknown): string | undefined {
     return nested['id'] as string;
   }
   return undefined;
+}
+
+function extractOrderStatus(response: unknown): string | undefined {
+  if (!response || typeof response !== 'object') return undefined;
+  const value = response as Record<string, unknown>;
+  if (typeof value['status'] === 'string' && value['status'] !== '') return String(value['status']).toUpperCase();
+  return undefined;
+}
+
+function extractFilledPrice(response: unknown): number | null {
+  if (!response || typeof response !== 'object') return null;
+  const value = response as Record<string, unknown>;
+  const price = value['price'] ?? value['filledPrice'];
+  const parsed = parseFloat(String(price ?? ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function extractFilledSize(response: unknown): number | null {
+  if (!response || typeof response !== 'object') return null;
+  const value = response as Record<string, unknown>;
+  const size = value['sizeMatched'] ?? value['size_matched'] ?? value['makingAmount'];
+  const parsed = parseFloat(String(size ?? ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function aggregateFills(trades: ClobTrade[]): {
+  totalSize: number;
+  weightedPrice: number | null;
+  feesUsdcEstimate: number;
+} {
+  let totalSize = 0;
+  let totalNotional = 0;
+  let feesUsdcEstimate = 0;
+
+  for (const t of trades) {
+    const size = parseNum(t.size);
+    const price = parseNum(t.price);
+    if (size === null || price === null || size <= 0 || price <= 0) continue;
+
+    const notional = size * price;
+    totalSize += size;
+    totalNotional += notional;
+
+    const feeRateBps = parseNum(t.fee_rate_bps) ?? 0;
+    feesUsdcEstimate += notional * (feeRateBps / 10_000);
+  }
+
+  return {
+    totalSize: round6(totalSize),
+    weightedPrice: totalSize > 0 ? round6(totalNotional / totalSize) : null,
+    feesUsdcEstimate: round6(feesUsdcEstimate),
+  };
+}
+
+function parseNum(v: unknown): number | null {
+  const parsed = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function round6(v: number): number {
+  return Math.round(v * 1_000_000) / 1_000_000;
 }
 
 function clamp(v: number, min: number, max: number): number {
