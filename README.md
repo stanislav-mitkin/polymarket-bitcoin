@@ -73,8 +73,9 @@ Dashboard: **http://localhost:3000**
 ```bash
 npm run build    # compile to dist/
 npm run start    # run compiled version (for production)
-npm run audit:live -- --limit=50         # read-only live reconciliation audit
-npm run audit:live -- --limit=50 --apply # apply fill/fee updates + recompute settled live pnl
+npm run preflight:live                             # live dry-run readiness checks
+npm run audit:live -- --limit=50 --max-pages=5         # read-only live reconciliation audit
+npm run audit:live -- --limit=50 --max-pages=5 --apply # apply fill/fee updates + recompute settled live pnl
 ```
 
 ### Trading Mode
@@ -108,6 +109,15 @@ Live execution notes:
 - `filled_price`, `filled_size`, and `fees_usdc` are persisted on the trade row.
 - Settlement P&L for `mode=live` is computed from reconciled fills (not from snapshot prices).
 - `fees_usdc` is currently estimated from `fee_rate_bps * fill_notional`; validate against exchange statements before scaling size.
+
+Step 1 practical rollout (safe dry-run):
+1. Set `TRADING_MODE=live` and `LIVE_DRY_RUN=true`.
+2. Run `npm run preflight:live` and require all checks PASS.
+3. Start bot and keep it running 24–48h.
+4. During run, require:
+   - no repeated `FAILED/REJECTED` live statuses,
+   - no kill-switch activation,
+   - periodic `npm run audit:live -- --limit=50 --max-pages=5` shows small/no drift.
 
 ---
 

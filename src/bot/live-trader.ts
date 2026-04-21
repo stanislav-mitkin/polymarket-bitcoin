@@ -24,6 +24,7 @@ type GeoblockStatus = {
 
 const GEOBLOCK_URL = 'https://polymarket.com/api/geoblock';
 const GEOBLOCK_TTL_MS = 5 * 60_000;
+const RECONCILE_MAX_TRADE_PAGES = 5;
 
 export class LiveTraderExecutor implements TradeExecutor {
   private client: ClobClient | null = null;
@@ -180,7 +181,7 @@ export class LiveTraderExecutor implements TradeExecutor {
         let filledPrice = parseNum(order?.price);
         let feesUsdc: number | null = null;
 
-        const trades = await client.getTrades({ market: row.market_id }, true);
+        const trades = await fetchMarketTrades(client, row.market_id, RECONCILE_MAX_TRADE_PAGES);
         const ownFills = trades.filter((t) => t.taker_order_id === row.live_order_id);
         if (ownFills.length > 0) {
           const aggregates = aggregateFills(ownFills);
@@ -365,6 +366,26 @@ function parseNum(v: unknown): number | null {
 
 function round6(v: number): number {
   return Math.round(v * 1_000_000) / 1_000_000;
+}
+
+async function fetchMarketTrades(client: ClobClient, marketId: string, maxPages: number): Promise<ClobTrade[]> {
+  const out: ClobTrade[] = [];
+  let cursor: string | undefined;
+  let page = 0;
+
+  while (page < maxPages) {
+    const resp = await client.getTradesPaginated({ market: marketId }, cursor);
+    if (!resp?.trades || resp.trades.length === 0) break;
+
+    out.push(...resp.trades);
+    page += 1;
+
+    const next = resp.next_cursor;
+    if (!next || next === 'LTE=') break;
+    cursor = next;
+  }
+
+  return out;
 }
 
 function clamp(v: number, min: number, max: number): number {

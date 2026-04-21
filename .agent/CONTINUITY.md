@@ -4,6 +4,7 @@
 - 2026-04-21T12:03Z [USER] Implement next stage: hard risk controls and live order status reconciliation in DB.
 - 2026-04-21T12:07Z [USER] Continue to next stage: trade-level fee reconciliation and live settlement P&L based on actual fills.
 - 2026-04-21T12:10Z [USER] Add reconciliation audit/autocorrect workflow to calibrate stored fill/fee/PnL data.
+- 2026-04-21T12:14Z [USER] Start practical step 1: dry-run readiness gate before 24–48h live shadow run.
 
 [DECISIONS]
 - 2026-04-21T11:59Z [CODE] Introduced `TradingConfig` with `TRADING_MODE` (`paper|live`), `TRADE_SIZE_USDC`, and required live env checks (`POLY_PRIVATE_KEY`, `POLY_SIGNATURE_TYPE`, `POLY_FUNDER_ADDRESS`).
@@ -24,6 +25,9 @@
 - 2026-04-21T12:10Z [CODE] Added `src/scripts/live-reconciliation-audit.ts` to compare stored live fill/fee data with CLOB trades, print deltas, and optionally apply updates.
 - 2026-04-21T12:10Z [CODE] Added `recomputeSettledTradePnlById()` DB helper so audit `--apply` can recompute settled live P&L after fill/fee corrections.
 - 2026-04-21T12:10Z [CODE] Added npm scripts `audit:live` / `audit:live:dev` and documented usage in README.
+- 2026-04-21T12:12Z [CODE] Added paginated CLOB trade loading (`getTradesPaginated`) in both runtime live reconciliation and audit script.
+- 2026-04-21T12:14Z [CODE] Added `src/scripts/live-preflight.ts` with explicit PASS/FAIL checks: geoblock, API creds, closed-only mode, collateral balance/allowance, and next-market availability.
+- 2026-04-21T12:14Z [CODE] Added npm scripts `preflight:live` / `preflight:live:dev`; documented step-1 dry-run runbook in README.
 
 [DISCOVERIES]
 - 2026-04-21T11:59Z [TOOL] Local tool environment has `node` but no `npm`; direct `npm run build` cannot be executed here.
@@ -31,9 +35,11 @@
 - 2026-04-21T12:03Z [CODE] CLOB order status reconciliation is possible from `getOrder` (status, price, size_matched), but exact fee accounting still needs trade-level fill parsing.
 - 2026-04-21T12:07Z [CODE] CLOB `getTrades({market})` includes `taker_order_id`, `size`, `price`, `fee_rate_bps`, enabling fill aggregation per order; fee is still an estimate from `fee_rate_bps * notional`.
 - 2026-04-21T12:10Z [ASSUMPTION] Audit currently fetches only first page of market trades (`only_first_page=true`) for speed; highly active markets may require pagination support if order fills are missing from first page.
+- 2026-04-21T12:12Z [CODE] Pagination now configurable in audit via `--max-pages` (default 5); this removes first-page blind spots on active markets.
 
 [OUTCOMES]
 - 2026-04-21T11:59Z [CODE] Foundation for live mode is implemented and wired into runtime selection; project compiles via TypeScript no-emit check. Remaining work: true live order lifecycle reconciliation (order status/fills/fees) and DB schema expansion for precise live accounting.
 - 2026-04-21T12:03Z [CODE] Stage 3 and most of Stage 4 completed: risk-limits active, DB schema expanded, and live status/fill reconciliation implemented. Remaining gap: fee-accurate P&L from raw fill/trade data.
 - 2026-04-21T12:07Z [CODE] Next-stage implementation done: settlement for live mode now uses reconciled fills and estimated fees. Remaining gap narrowed to validation/calibration of fee formula against exchange-reported settlements.
 - 2026-04-21T12:10Z [CODE] Reconciliation calibration loop is now operational via explicit audit command (`--apply` for auto-correction + settled P&L recompute). Remaining improvement: optional pagination in audit for complete fill coverage on high-volume markets.
+- 2026-04-21T12:14Z [CODE] Practical step-1 gate is now codified and executable. Operator can block unsafe dry-run starts with a single preflight command.

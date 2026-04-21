@@ -21,13 +21,16 @@ interface FillAgg {
   feesUsdcEstimate: number;
 }
 
-function parseArgs(): { apply: boolean; limit: number } {
+function parseArgs(): { apply: boolean; limit: number; maxPages: number } {
   const args = process.argv.slice(2);
   const apply = args.includes('--apply');
   const limitArg = args.find((a) => a.startsWith('--limit='));
+  const pagesArg = args.find((a) => a.startsWith('--max-pages='));
   const limit = limitArg ? Number(limitArg.split('=')[1]) : 50;
+  const maxPages = pagesArg ? Number(pagesArg.split('=')[1]) : 5;
   if (!Number.isFinite(limit) || limit <= 0) throw new Error(`Invalid --limit value: ${limitArg}`);
-  return { apply, limit: Math.floor(limit) };
+  if (!Number.isFinite(maxPages) || maxPages <= 0) throw new Error(`Invalid --max-pages value: ${pagesArg}`);
+  return { apply, limit: Math.floor(limit), maxPages: Math.floor(maxPages) };
 }
 
 function createSigner(privateKey: string): ClobSigner {
@@ -75,7 +78,7 @@ function aggregateFills(trades: ClobTrade[], orderId: string): FillAgg {
 }
 
 async function main(): Promise<void> {
-  const { apply, limit } = parseArgs();
+  const { apply, limit, maxPages } = parseArgs();
   const cfg = loadTradingConfig();
   if (cfg.mode !== 'live') {
     throw new Error('Set TRADING_MODE=live for reconciliation audit.');
@@ -123,7 +126,7 @@ async function main(): Promise<void> {
     try {
       let marketTrades = marketTradesCache.get(row.market_id);
       if (!marketTrades) {
-        marketTrades = await clob.getTrades({ market: row.market_id }, true);
+        marketTrades = await fetchMarketTrades(clob, row.market_id, maxPages);
         marketTradesCache.set(row.market_id, marketTrades);
       }
 
@@ -181,6 +184,26 @@ async function main(): Promise<void> {
 function fmt(v: number | null): string {
   if (v === null || Number.isNaN(v)) return 'null';
   return v.toFixed(6);
+}
+
+async function fetchMarketTrades(client: ClobClient, marketId: string, maxPages: number): Promise<ClobTrade[]> {
+  const out: ClobTrade[] = [];
+  let cursor: string | undefined;
+  let page = 0;
+
+  while (page < maxPages) {
+    const resp = await client.getTradesPaginated({ market: marketId }, cursor);
+    if (!resp?.trades || resp.trades.length === 0) break;
+
+    out.push(...resp.trades);
+    page += 1;
+
+    const next = resp.next_cursor;
+    if (!next || next === 'LTE=') break;
+    cursor = next;
+  }
+
+  return out;
 }
 
 main().catch((err) => {
