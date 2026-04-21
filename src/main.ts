@@ -2,17 +2,20 @@ import { startStreaming } from './data/collector';
 import { computeFeatures } from './data/features';
 import { getNextMarket } from './bot/polymarket';
 import { predict, reloadModel, getModelInfo } from './model/predictor';
-import { executePaperTrade } from './bot/paper-trader';
 import { settleExpiredTrades } from './bot/settler';
 import { startDashboard } from './dashboard/server';
 import { hasTradeForMarket } from './db/database';
 import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/trainer';
 import { loadRegime } from './model/regime';
+import { loadTradingConfig } from './config/trading';
+import { createTradeExecutor } from './bot/trade-executor';
 
 const TICK_INTERVAL_MS = 60_000;       // Run prediction loop every 1 minute
 const SETTLE_INTERVAL_MS = 2 * 60_000; // Check settlements every 2 minutes
 const WARMUP_MS = 10_000;              // Wait for WS data before first tick
 const MIN_EDGE = 0.04;                 // Minimum edge = 4% (confidence - breakeven price)
+const tradingConfig = loadTradingConfig();
+const tradeExecutor = createTradeExecutor(tradingConfig);
 
 async function tick(): Promise<void> {
   try {
@@ -80,8 +83,14 @@ async function tick(): Promise<void> {
       return;
     }
 
-    // 7. Execute paper trade
-    executePaperTrade(market, prediction, features, edge);
+    // 7. Execute trade (paper or live)
+    await tradeExecutor.execute({
+      market,
+      prediction,
+      features,
+      edge,
+      sizeUsdc: tradingConfig.tradeSizeUsdc,
+    });
 
   } catch (err) {
     console.error('[Bot] Tick error:', err);
@@ -90,7 +99,7 @@ async function tick(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('═══════════════════════════════════════════');
-  console.log('  Polymarket BTC 5M — Paper Trading Bot');
+  console.log(`  Polymarket BTC 5M — ${tradingConfig.mode.toUpperCase()} Trading Bot`);
   console.log('═══════════════════════════════════════════');
 
   // Start WebSocket streams from Binance
@@ -123,6 +132,10 @@ async function main(): Promise<void> {
     console.log(`[Bot] ML model active | trained on ${modelInfo.samples} samples | val_acc=${((modelInfo.valAcc ?? 0) * 100).toFixed(1)}%`);
   } else {
     console.log(`[Bot] Rule-based mode (ML activates after ${MIN_TRADES_FOR_TRAINING} settled trades, retrains every ${RETRAIN_EVERY})`);
+  }
+  console.log(`[Bot] Trading mode=${tradingConfig.mode} | tradeSize=$${tradingConfig.tradeSizeUsdc.toFixed(2)}`);
+  if (tradingConfig.mode === 'live') {
+    console.log(`[Bot] Live dry-run=${tradingConfig.live.dryRun} | host=${tradingConfig.live.host}`);
   }
   console.log('[Bot] Running. Dashboard: http://localhost:3000');
 }

@@ -1,6 +1,6 @@
 import { saveTrade } from '../db/database';
 import { type Features } from '../data/features';
-import { type Prediction, TRADE_SIZE_USDC } from '../model/predictor';
+import { type Prediction } from '../model/predictor';
 import { type PolyMarket5M } from './polymarket';
 
 export interface PaperTrade {
@@ -18,7 +18,8 @@ export function executePaperTrade(
   market: PolyMarket5M,
   prediction: Prediction,
   features: Features,
-  edge: number
+  edge: number,
+  sizeUsdc: number
 ): PaperTrade {
   const tradeId = saveTrade(
     {
@@ -29,7 +30,7 @@ export function executePaperTrade(
       edge: Math.round(edge * 10000) / 10000,
       price_yes: market.priceUp,   // "Up" outcome = YES
       price_no: market.priceDown,  // "Down" outcome = NO
-      size_usdc: TRADE_SIZE_USDC,
+      size_usdc: sizeUsdc,
     },
     {
       obi: features.obi,
@@ -59,6 +60,6 @@ export function executePaperTrade(
     marketEnd: market.endDateIso,
     priceUp: market.priceUp,
     priceDown: market.priceDown,
-    sizeUsdc: TRADE_SIZE_USDC,
+    sizeUsdc,
   };
 }

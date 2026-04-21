@@ -32,7 +32,7 @@ Dashboard:
 - **Auto-retraining** — Logistic Regression model activates after 50 settled trades, retrains every 25
 - **Web dashboard** — Win rate, cumulative P&L chart, feature importances, trade history
 - **Next trade countdown** — live timer showing seconds until next 5-minute window
-- **Paper trading only** — no wallet, no API keys, no real money required
+- **Switchable execution mode** — `TRADING_MODE=paper|live` with `LIVE_DRY_RUN=true` safety mode
 
 ---
 
@@ -75,6 +75,26 @@ npm run build    # compile to dist/
 npm run start    # run compiled version (for production)
 ```
 
+### Trading Mode
+
+```bash
+# .env
+TRADING_MODE=paper   # default
+TRADE_SIZE_USDC=10
+```
+
+Live mode requires extra env vars:
+
+```bash
+TRADING_MODE=live
+LIVE_DRY_RUN=true           # recommended for first rollout
+POLY_CLOB_HOST=https://clob.polymarket.com
+POLY_CHAIN_ID=137
+POLY_PRIVATE_KEY=0x...
+POLY_SIGNATURE_TYPE=1
+POLY_FUNDER_ADDRESS=0x...
+```
+
 ---
 
 ## Project Structure
@@ -89,7 +109,9 @@ src/
 │
 ├── bot/
 │   ├── polymarket.ts          # Polymarket Gamma API client (read-only)
+│   ├── live-trader.ts         # Live CLOB execution (geoblock + allowance checks)
 │   ├── paper-trader.ts        # Virtual trade execution — saves to DB
+│   ├── trade-executor.ts      # Runtime executor switch: paper/live
 │   └── settler.ts             # Resolves outcomes after market expiry
 │
 ├── model/
@@ -245,6 +267,7 @@ Current demo results (as of initial testing):
 - [ ] Collect 200+ trades for reliable ML training
 - [ ] Add multi-asset support (ETH, SOL 5M markets)
 - [ ] Add liquidation cascade data from CoinGlass
-- [ ] Implement live trading mode (`@polymarket/clob-client` + Polygon wallet)
+- [ ] Harden live trading mode (order lifecycle reconciliation + production safeguards)
+- [ ] Reconcile live fills/fees into exact P&L (currently DB entry prices are snapshot-based)
 - [ ] Add Telegram/Discord alerts for trades and daily P&L summary
 - [ ] Backtest on historical Chainlink oracle data
