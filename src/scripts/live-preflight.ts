@@ -28,6 +28,7 @@ function printResult(result: CheckResult): void {
 async function main(): Promise<void> {
   const config = loadTradingConfig();
   const checks: CheckResult[] = [];
+  const dryRun = config.live.dryRun;
 
   if (config.mode !== 'live') {
     throw new Error('Preflight requires TRADING_MODE=live');
@@ -44,7 +45,11 @@ async function main(): Promise<void> {
 
   const geoRes = await fetch(GEOBLOCK_URL, { headers: HTTP_HEADERS });
   if (!geoRes.ok) {
-    checks.push({ name: 'Geoblock', ok: false, detail: `HTTP ${geoRes.status}` });
+    checks.push({
+      name: 'Geoblock',
+      ok: dryRun,
+      detail: `HTTP ${geoRes.status}${dryRun ? ' (WARN in dry-run)' : ''}`,
+    });
   } else {
     const geo = await geoRes.json() as GeoblockStatus;
     checks.push({
@@ -118,8 +123,11 @@ async function main(): Promise<void> {
   });
   checks.push({
     name: 'Collateral allowance',
-    ok: allowance !== null && allowance >= config.tradeSizeUsdc,
-    detail: `allowance=${formatAmount(allowance)} required>=${config.tradeSizeUsdc.toFixed(4)} (raw=${String(collateral.allowance)})`,
+    ok: allowance !== null
+      ? allowance >= config.tradeSizeUsdc
+      : dryRun,
+    detail: `allowance=${formatAmount(allowance)} required>=${config.tradeSizeUsdc.toFixed(4)} (raw=${String(collateral.allowance)})` +
+      (allowance === null && dryRun ? ' (WARN in dry-run)' : ''),
   });
 
   const market = await getNextMarket();

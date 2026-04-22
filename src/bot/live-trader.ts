@@ -70,7 +70,7 @@ export class LiveTraderExecutor implements TradeExecutor {
     }
 
     const collateral = await client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-    ensureEnoughCollateral(collateral, input.sizeUsdc);
+    ensureEnoughCollateral(collateral, input.sizeUsdc, this.config.dryRun);
 
     let externalOrderId: string | undefined;
     let liveStatus = this.config.dryRun ? 'DRY_RUN' : 'PENDING_SUBMIT';
@@ -278,22 +278,28 @@ function createSigner(privateKey: string): ClobSigner {
   };
 }
 
-function ensureEnoughCollateral(collateral: BalanceAllowanceResponse, amountUsdc: number): void {
+function ensureEnoughCollateral(collateral: BalanceAllowanceResponse, amountUsdc: number, dryRun: boolean): void {
   const balance = parseNum(collateral.balance);
   const allowance = parseNum(collateral.allowance);
 
   if (balance === null) {
     throw new Error(`Invalid collateral balance value: ${String(collateral.balance)}`);
   }
-  if (allowance === null) {
+  if (allowance === null && !dryRun) {
     throw new Error(`Invalid collateral allowance value: ${String(collateral.allowance)}`);
   }
 
   if (balance < amountUsdc) {
     throw new Error(`Insufficient collateral balance: ${balance.toFixed(4)} < ${amountUsdc.toFixed(4)} USDC.`);
   }
-  if (allowance < amountUsdc) {
+  if (allowance !== null && allowance < amountUsdc) {
     throw new Error(`Insufficient collateral allowance: ${allowance.toFixed(4)} < ${amountUsdc.toFixed(4)} USDC.`);
+  }
+
+  if (allowance === null && dryRun) {
+    console.warn(
+      `[LiveTrader] WARN: collateral allowance is not numeric (${String(collateral.allowance)}). Allowed in dry-run only.`
+    );
   }
 }
 
