@@ -28,6 +28,9 @@
 - 2026-04-21T12:12Z [CODE] Added paginated CLOB trade loading (`getTradesPaginated`) in both runtime live reconciliation and audit script.
 - 2026-04-21T12:14Z [CODE] Added `src/scripts/live-preflight.ts` with explicit PASS/FAIL checks: geoblock, API creds, closed-only mode, collateral balance/allowance, and next-market availability.
 - 2026-04-21T12:14Z [CODE] Added npm scripts `preflight:live` / `preflight:live:dev`; documented step-1 dry-run runbook in README.
+- 2026-04-22T12:59Z [CODE] Hardened geoblock requests in preflight/runtime with explicit `User-Agent` + `Accept` headers to avoid HTTP 404 false negatives.
+- 2026-04-22T12:59Z [CODE] Preflight now attempts one-time `updateBalanceAllowance` auto-init when allowance parses as invalid, then re-reads allowance.
+- 2026-04-22T12:59Z [CODE] Runtime collateral guard now fails hard on non-numeric balance/allowance instead of allowing NaN to bypass checks.
 
 [DISCOVERIES]
 - 2026-04-21T11:59Z [TOOL] Local tool environment has `node` but no `npm`; direct `npm run build` cannot be executed here.
@@ -36,6 +39,7 @@
 - 2026-04-21T12:07Z [CODE] CLOB `getTrades({market})` includes `taker_order_id`, `size`, `price`, `fee_rate_bps`, enabling fill aggregation per order; fee is still an estimate from `fee_rate_bps * notional`.
 - 2026-04-21T12:10Z [ASSUMPTION] Audit currently fetches only first page of market trades (`only_first_page=true`) for speed; highly active markets may require pagination support if order fills are missing from first page.
 - 2026-04-21T12:12Z [CODE] Pagination now configurable in audit via `--max-pages` (default 5); this removes first-page blind spots on active markets.
+- 2026-04-22T12:59Z [TOOL] Server preflight outputs showed `Geoblock: HTTP 404` and `allowance=NaN`; both are now explicitly handled in code to reduce operator confusion and unsafe passes.
 
 [OUTCOMES]
 - 2026-04-21T11:59Z [CODE] Foundation for live mode is implemented and wired into runtime selection; project compiles via TypeScript no-emit check. Remaining work: true live order lifecycle reconciliation (order status/fills/fees) and DB schema expansion for precise live accounting.

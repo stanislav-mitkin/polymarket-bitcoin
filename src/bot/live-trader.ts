@@ -25,6 +25,10 @@ type GeoblockStatus = {
 const GEOBLOCK_URL = 'https://polymarket.com/api/geoblock';
 const GEOBLOCK_TTL_MS = 5 * 60_000;
 const RECONCILE_MAX_TRADE_PAGES = 5;
+const HTTP_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent': 'Mozilla/5.0 (compatible; polymarket-bot/1.0)',
+};
 
 export class LiveTraderExecutor implements TradeExecutor {
   private client: ClobClient | null = null;
@@ -251,7 +255,7 @@ export class LiveTraderExecutor implements TradeExecutor {
       return;
     }
 
-    const res = await fetch(GEOBLOCK_URL, { headers: { Accept: 'application/json' } });
+    const res = await fetch(GEOBLOCK_URL, { headers: HTTP_HEADERS });
     if (!res.ok) throw new Error(`Geoblock check failed with status=${res.status}.`);
 
     const status = await res.json() as GeoblockStatus;
@@ -275,8 +279,15 @@ function createSigner(privateKey: string): ClobSigner {
 }
 
 function ensureEnoughCollateral(collateral: BalanceAllowanceResponse, amountUsdc: number): void {
-  const balance = parseFloat(collateral.balance);
-  const allowance = parseFloat(collateral.allowance);
+  const balance = parseNum(collateral.balance);
+  const allowance = parseNum(collateral.allowance);
+
+  if (balance === null) {
+    throw new Error(`Invalid collateral balance value: ${String(collateral.balance)}`);
+  }
+  if (allowance === null) {
+    throw new Error(`Invalid collateral allowance value: ${String(collateral.allowance)}`);
+  }
 
   if (balance < amountUsdc) {
     throw new Error(`Insufficient collateral balance: ${balance.toFixed(4)} < ${amountUsdc.toFixed(4)} USDC.`);

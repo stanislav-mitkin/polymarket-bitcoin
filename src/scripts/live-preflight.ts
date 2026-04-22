@@ -7,6 +7,10 @@ type CheckResult = { name: string; ok: boolean; detail: string };
 type GeoblockStatus = { blocked?: boolean; country?: string; region?: string; ip?: string };
 
 const GEOBLOCK_URL = 'https://polymarket.com/api/geoblock';
+const HTTP_HEADERS = {
+  Accept: 'application/json',
+  'User-Agent': 'Mozilla/5.0 (compatible; polymarket-bot/1.0)',
+};
 
 function createSigner(privateKey: string): ClobSigner {
   const normalized = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
@@ -38,7 +42,7 @@ async function main(): Promise<void> {
     checks.push({ name: 'LIVE_DRY_RUN', ok: true, detail: 'enabled' });
   }
 
-  const geoRes = await fetch(GEOBLOCK_URL, { headers: { Accept: 'application/json' } });
+  const geoRes = await fetch(GEOBLOCK_URL, { headers: HTTP_HEADERS });
   if (!geoRes.ok) {
     checks.push({ name: 'Geoblock', ok: false, detail: `HTTP ${geoRes.status}` });
   } else {
@@ -86,18 +90,36 @@ async function main(): Promise<void> {
     detail: `closed_only=${closedOnly.closed_only}`,
   });
 
-  const collateral = await clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-  const balance = parseFloat(collateral.balance);
-  const allowance = parseFloat(collateral.allowance);
+  let collateral = await clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+  let balance = parseNumberish(collateral.balance);
+  let allowance = parseNumberish(collateral.allowance);
+
+  // Some accounts have undefined/empty allowance until the first update call.
+  // Try to initialize allowance once in preflight so operators can proceed.
+  if (allowance === null) {
+    try {
+      await clob.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      collateral = await clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+      balance = parseNumberish(collateral.balance);
+      allowance = parseNumberish(collateral.allowance);
+    } catch (err) {
+      checks.push({
+        name: 'Collateral allowance init',
+        ok: false,
+        detail: `updateBalanceAllowance failed: ${String(err)}`,
+      });
+    }
+  }
+
   checks.push({
     name: 'Collateral balance',
-    ok: Number.isFinite(balance) && balance >= config.tradeSizeUsdc,
-    detail: `balance=${balance.toFixed(4)} required>=${config.tradeSizeUsdc.toFixed(4)}`,
+    ok: balance !== null && balance >= config.tradeSizeUsdc,
+    detail: `balance=${formatAmount(balance)} required>=${config.tradeSizeUsdc.toFixed(4)} (raw=${String(collateral.balance)})`,
   });
   checks.push({
     name: 'Collateral allowance',
-    ok: Number.isFinite(allowance) && allowance >= config.tradeSizeUsdc,
-    detail: `allowance=${allowance.toFixed(4)} required>=${config.tradeSizeUsdc.toFixed(4)}`,
+    ok: allowance !== null && allowance >= config.tradeSizeUsdc,
+    detail: `allowance=${formatAmount(allowance)} required>=${config.tradeSizeUsdc.toFixed(4)} (raw=${String(collateral.allowance)})`,
   });
 
   const market = await getNextMarket();
@@ -133,3 +155,13 @@ main().catch((err) => {
   console.error('[Preflight] Fatal:', err);
   process.exit(1);
 });
+
+function parseNumberish(v: unknown): number | null {
+  const parsed = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatAmount(v: number | null): string {
+  if (v === null) return 'NaN';
+  return v.toFixed(4);
+}
