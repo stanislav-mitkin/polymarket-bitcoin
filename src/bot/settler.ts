@@ -13,6 +13,24 @@ export async function settleExpiredTrades(): Promise<void> {
 
   for (const trade of unsettled) {
     try {
+      // Skip live trades that never resulted in a real position — no money was at risk.
+      if (trade.mode === 'live') {
+        const status = (trade.live_status ?? '').toUpperCase();
+        if (['FAILED', 'REJECTED', 'CANCELED', 'CANCELLED', 'DRY_RUN'].includes(status)) {
+          console.log(
+            `[Settler] Trade #${trade.id} skipped — live_status=${trade.live_status} (no position opened)`
+          );
+          continue;
+        }
+        // Also skip if no fill data and status is not a confirmed fill.
+        if (!trade.filled_size && !['MATCHED', 'FILLED'].includes(status)) {
+          console.log(
+            `[Settler] Trade #${trade.id} skipped — live trade with no fill (status=${trade.live_status ?? 'null'})`
+          );
+          continue;
+        }
+      }
+
       const outcome = await resolveMarketOutcome(trade.market_id);
       if (!outcome) {
         console.log(`[Settler] Trade #${trade.id} — outcome not available yet`);
