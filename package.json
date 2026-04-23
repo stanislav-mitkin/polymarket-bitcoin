@@ -4,16 +4,16 @@
   "description": "Polymarket BTC 5-Minute paper trading bot with dashboard",
   "main": "dist/main.js",
   "scripts": {
-    "dev": "tsx watch src/main.ts",
+    "dev": "tsx watch --env-file=.env src/main.ts",
     "build": "tsc && cp -r src/dashboard/public dist/dashboard/public",
-    "start": "node dist/main.js",
-    "dashboard": "tsx src/dashboard/server.ts",
-    "report": "node dist/scripts/regime-report.js",
-    "report:dev": "tsx src/scripts/regime-report.ts",
-    "preflight:live": "node dist/scripts/live-preflight.js",
-    "preflight:live:dev": "tsx src/scripts/live-preflight.ts",
-    "audit:live": "node dist/scripts/live-reconciliation-audit.js",
-    "audit:live:dev": "tsx src/scripts/live-reconciliation-audit.ts"
+    "start": "node --env-file=.env dist/main.js",
+    "dashboard": "tsx --env-file=.env src/dashboard/server.ts",
+    "report": "node --env-file=.env dist/scripts/regime-report.js",
+    "report:dev": "tsx --env-file=.env src/scripts/regime-report.ts",
+    "preflight:live": "node --env-file=.env dist/scripts/live-preflight.js",
+    "preflight:live:dev": "tsx --env-file=.env src/scripts/live-preflight.ts",
+    "audit:live": "node --env-file=.env dist/scripts/live-reconciliation-audit.js",
+    "audit:live:dev": "tsx --env-file=.env src/scripts/live-reconciliation-audit.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.1",
