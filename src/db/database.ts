@@ -69,60 +69,93 @@ try { db.exec('ALTER TABLE snapshots ADD COLUMN volume_delta REAL'); } catch (_)
 try { db.exec('ALTER TABLE snapshots ADD COLUMN btc_trend_1h REAL'); } catch (_) {}
 
 // Migration: rebuild trades to widen outcome CHECK to include 'PUSH'.
-// SQLite cannot ALTER CHECK in place; use PRAGMA user_version as a guard so we
-// only run the rebuild once per database.
+// SQLite cannot ALTER CHECK in place; use PRAGMA user_version as a guard and
+// extra schema checks so partial/older states don't crash at startup.
 const SCHEMA_VERSION = 1;
 {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
-  if ((row?.user_version ?? 0) < SCHEMA_VERSION) {
-    // Foreign keys must be disabled outside the transaction — SQLite ignores
-    // PRAGMA foreign_keys changes made inside a transaction.
-    db.pragma('foreign_keys = OFF');
-    db.exec(`
-      BEGIN;
-      ALTER TABLE trades RENAME TO trades_old;
-      CREATE TABLE trades (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-        market_id     TEXT NOT NULL,
-        market_end    TEXT NOT NULL,
-        signal        TEXT NOT NULL CHECK (signal IN ('UP', 'DOWN')),
-        confidence    REAL NOT NULL,
-        edge          REAL,
-        mode          TEXT NOT NULL DEFAULT 'paper' CHECK (mode IN ('paper', 'live')),
-        live_order_id TEXT,
-        live_status   TEXT,
-        live_error    TEXT,
-        requested_price REAL,
-        requested_size  REAL,
-        filled_price    REAL,
-        filled_size     REAL,
-        fees_usdc       REAL,
-        live_updated_at TEXT,
-        price_yes     REAL NOT NULL,
-        price_no      REAL NOT NULL,
-        size_usdc     REAL NOT NULL DEFAULT 10,
-        outcome       TEXT CHECK (outcome IN ('UP', 'DOWN', 'PUSH')),
-        pnl           REAL,
-        settled_at    TEXT
-      );
-      INSERT INTO trades (
-        id, created_at, market_id, market_end, signal, confidence, edge,
-        mode, live_order_id, live_status, live_error,
-        requested_price, requested_size, filled_price, filled_size, fees_usdc, live_updated_at,
-        price_yes, price_no, size_usdc, outcome, pnl, settled_at
-      )
-      SELECT
-        id, created_at, market_id, market_end, signal, confidence, edge,
-        mode, live_order_id, live_status, live_error,
-        requested_price, requested_size, filled_price, filled_size, fees_usdc, live_updated_at,
-        price_yes, price_no, size_usdc, outcome, pnl, settled_at
-      FROM trades_old;
-      DROP TABLE trades_old;
-      PRAGMA user_version = ${SCHEMA_VERSION};
-      COMMIT;
-    `);
-    db.pragma('foreign_keys = ON');
+  const currentVersion = row?.user_version ?? 0;
+  const tradesSql = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'`
+  ).get() as { sql?: string } | undefined;
+  const hasPushOutcome = (tradesSql?.sql ?? '').includes(`'PUSH'`);
+
+  if (currentVersion < SCHEMA_VERSION && hasPushOutcome) {
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  } else if (currentVersion < SCHEMA_VERSION) {
+    const hasTrades = tableExists('trades');
+    const hasTradesOld = tableExists('trades_old');
+    if (!hasTrades && !hasTradesOld) {
+      db.pragma(`user_version = ${SCHEMA_VERSION}`);
+    } else {
+      db.pragma('foreign_keys = OFF');
+      db.exec('BEGIN');
+      try {
+        // Keep a stable source table for copy, regardless of partial past runs.
+        if (!hasTradesOld && hasTrades) {
+          db.exec('ALTER TABLE trades RENAME TO trades_old');
+        }
+
+        db.exec(`
+          DROP TABLE IF EXISTS trades_new;
+          CREATE TABLE trades_new (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            market_id     TEXT NOT NULL,
+            market_end    TEXT NOT NULL,
+            signal        TEXT NOT NULL CHECK (signal IN ('UP', 'DOWN')),
+            confidence    REAL NOT NULL,
+            edge          REAL,
+            mode          TEXT NOT NULL DEFAULT 'paper' CHECK (mode IN ('paper', 'live')),
+            live_order_id TEXT,
+            live_status   TEXT,
+            live_error    TEXT,
+            requested_price REAL,
+            requested_size  REAL,
+            filled_price    REAL,
+            filled_size     REAL,
+            fees_usdc       REAL,
+            live_updated_at TEXT,
+            price_yes     REAL NOT NULL,
+            price_no      REAL NOT NULL,
+            size_usdc     REAL NOT NULL DEFAULT 10,
+            outcome       TEXT CHECK (outcome IN ('UP', 'DOWN', 'PUSH')),
+            pnl           REAL,
+            settled_at    TEXT
+          );
+        `);
+
+        const source = tableExists('trades_old') ? 'trades_old' : 'trades';
+        db.exec(`
+          INSERT INTO trades_new (
+            id, created_at, market_id, market_end, signal, confidence, edge,
+            mode, live_order_id, live_status, live_error,
+            requested_price, requested_size, filled_price, filled_size, fees_usdc, live_updated_at,
+            price_yes, price_no, size_usdc, outcome, pnl, settled_at
+          )
+          SELECT
+            id, created_at, market_id, market_end, signal, confidence, edge,
+            mode, live_order_id, live_status, live_error,
+            requested_price, requested_size, filled_price, filled_size, fees_usdc, live_updated_at,
+            price_yes, price_no, size_usdc, outcome, pnl, settled_at
+          FROM ${source};
+        `);
+
+        db.exec(`
+          DROP TABLE IF EXISTS trades;
+          ALTER TABLE trades_new RENAME TO trades;
+          DROP TABLE IF EXISTS trades_old;
+        `);
+
+        db.pragma(`user_version = ${SCHEMA_VERSION}`);
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      } finally {
+        db.pragma('foreign_keys = ON');
+      }
+    }
   }
 }
 
@@ -497,3 +530,10 @@ export function getPnlTimeline(): { created_at: string; cumulative_pnl: number }
 }
 
 export default db;
+
+function tableExists(name: string): boolean {
+  const row = db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name=?`
+  ).get(name) as { name?: string } | undefined;
+  return row?.name === name;
+}
