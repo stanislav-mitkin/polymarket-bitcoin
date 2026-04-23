@@ -68,10 +68,65 @@ try { db.exec('ALTER TABLE trades ADD COLUMN live_updated_at TEXT'); } catch (_)
 try { db.exec('ALTER TABLE snapshots ADD COLUMN volume_delta REAL'); } catch (_) {}
 try { db.exec('ALTER TABLE snapshots ADD COLUMN btc_trend_1h REAL'); } catch (_) {}
 
+// Migration: rebuild trades to widen outcome CHECK to include 'PUSH'.
+// SQLite cannot ALTER CHECK in place; use PRAGMA user_version as a guard so we
+// only run the rebuild once per database.
+const SCHEMA_VERSION = 1;
+{
+  const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
+  if ((row?.user_version ?? 0) < SCHEMA_VERSION) {
+    db.exec(`
+      BEGIN;
+      ALTER TABLE trades RENAME TO trades_old;
+      CREATE TABLE trades (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        market_id     TEXT NOT NULL,
+        market_end    TEXT NOT NULL,
+        signal        TEXT NOT NULL CHECK (signal IN ('UP', 'DOWN')),
+        confidence    REAL NOT NULL,
+        edge          REAL,
+        mode          TEXT NOT NULL DEFAULT 'paper' CHECK (mode IN ('paper', 'live')),
+        live_order_id TEXT,
+        live_status   TEXT,
+        live_error    TEXT,
+        requested_price REAL,
+        requested_size  REAL,
+        filled_price    REAL,
+        filled_size     REAL,
+        fees_usdc       REAL,
+        live_updated_at TEXT,
+        price_yes     REAL NOT NULL,
+        price_no      REAL NOT NULL,
+        size_usdc     REAL NOT NULL DEFAULT 10,
+        outcome       TEXT CHECK (outcome IN ('UP', 'DOWN', 'PUSH')),
+        pnl           REAL,
+        settled_at    TEXT
+      );
+      INSERT INTO trades (
+        id, created_at, market_id, market_end, signal, confidence, edge,
+        mode, live_order_id, live_status, live_error,
+        requested_price, requested_size, filled_price, filled_size, fees_usdc, live_updated_at,
+        price_yes, price_no, size_usdc, outcome, pnl, settled_at
+      )
+      SELECT
+        id, created_at, market_id, market_end, signal, confidence, edge,
+        mode, live_order_id, live_status, live_error,
+        requested_price, requested_size, filled_price, filled_size, fees_usdc, live_updated_at,
+        price_yes, price_no, size_usdc, outcome, pnl, settled_at
+      FROM trades_old;
+      DROP TABLE trades_old;
+      PRAGMA user_version = ${SCHEMA_VERSION};
+      COMMIT;
+    `);
+  }
+}
+
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_trades_outcome_market_end ON trades(outcome, market_end);
   CREATE INDEX IF NOT EXISTS idx_trades_mode_status ON trades(mode, live_status);
   CREATE INDEX IF NOT EXISTS idx_trades_settled_at ON trades(settled_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_trades_market_mode ON trades(market_id, mode);
 `);
 
 export interface Trade {
@@ -82,7 +137,7 @@ export interface Trade {
   signal: 'UP' | 'DOWN';
   confidence: number;
   edge?: number | null;
-  mode?: 'paper' | 'live';
+  mode: 'paper' | 'live';
   live_order_id?: string | null;
   live_status?: string | null;
   live_error?: string | null;
@@ -95,7 +150,7 @@ export interface Trade {
   price_yes: number;
   price_no: number;
   size_usdc: number;
-  outcome?: 'UP' | 'DOWN' | null;
+  outcome?: 'UP' | 'DOWN' | 'PUSH' | null;
   pnl?: number | null;
   settled_at?: string | null;
 }
@@ -144,7 +199,7 @@ const insertSnapshot = db.prepare<Snapshot>(`
   VALUES (@trade_id, @obi, @tfi, @spread, @funding_rate, @oi_delta, @rsi, @macd, @atr, @volume_delta, @btc_trend_1h, @btc_price)
 `);
 
-const settleTrade = db.prepare<{ outcome: string; pnl: number; id: number }>(`
+const settleTrade = db.prepare<{ outcome: 'UP' | 'DOWN' | 'PUSH'; pnl: number; id: number }>(`
   UPDATE trades SET outcome = @outcome, pnl = @pnl, settled_at = datetime('now')
   WHERE id = @id
 `);
@@ -155,8 +210,11 @@ const updateTradePnlStmt = db.prepare<{ id: number; pnl: number }>(`
 `);
 
 export function saveTrade(trade: Trade, snapshot: Omit<Snapshot, 'trade_id'>): number {
+  if (trade.mode !== 'paper' && trade.mode !== 'live') {
+    throw new Error(`saveTrade: 'mode' is required (paper|live), got ${String(trade.mode)}`);
+  }
   const result = insertTrade.run({
-    mode: 'paper',
+    edge: null,
     live_order_id: null,
     live_status: null,
     live_error: null,
@@ -183,7 +241,7 @@ export interface SettlementResult {
   feesUsdc: number;
 }
 
-export function settleTradeById(id: number, outcome: 'UP' | 'DOWN'): SettlementResult {
+export function settleTradeById(id: number, outcome: 'UP' | 'DOWN' | 'PUSH'): SettlementResult {
   const trade = getTradeByIdStmt.get(id) as Trade | undefined;
   if (!trade) throw new Error(`Trade not found: id=${id}`);
 
@@ -206,8 +264,18 @@ export function hasTradeForMarket(marketId: string): boolean {
 }
 
 export function countOpenTrades(): number {
+  // Exclude live rows that never resulted in an active position so a streak of
+  // rejects can't permanently block new trades via the maxOpenPositions gate.
   const row = db.prepare(
-    `SELECT COUNT(*) AS n FROM trades WHERE outcome IS NULL`
+    `
+      SELECT COUNT(*) AS n FROM trades
+      WHERE outcome IS NULL
+        AND (
+          mode = 'paper'
+          OR live_status IS NULL
+          OR upper(live_status) NOT IN ('FAILED', 'REJECTED', 'CANCELED', 'CANCELLED', 'DRY_RUN')
+        )
+    `
   ).get() as { n: number };
   return row.n ?? 0;
 }
@@ -258,6 +326,7 @@ export function getLiveTradesToReconcile(limit = 30): LiveTradeReconcileRow[] {
 export function updateLiveTradeMetaById(
   id: number,
   patch: {
+    live_order_id?: string | null;
     live_status?: string | null;
     live_error?: string | null;
     filled_price?: number | null;
@@ -269,8 +338,9 @@ export function updateLiveTradeMetaById(
     `
       UPDATE trades
       SET
+        live_order_id = COALESCE(@live_order_id, live_order_id),
         live_status = COALESCE(@live_status, live_status),
-        live_error = @live_error,
+        live_error = COALESCE(@live_error, live_error),
         filled_price = COALESCE(@filled_price, filled_price),
         filled_size = COALESCE(@filled_size, filled_size),
         fees_usdc = COALESCE(@fees_usdc, fees_usdc),
@@ -279,6 +349,7 @@ export function updateLiveTradeMetaById(
     `
   ).run({
     id,
+    live_order_id: patch.live_order_id ?? null,
     live_status: patch.live_status ?? null,
     live_error: patch.live_error ?? null,
     filled_price: patch.filled_price ?? null,
@@ -287,9 +358,30 @@ export function updateLiveTradeMetaById(
   });
 }
 
-function computeSettlement(trade: Trade, outcome: 'UP' | 'DOWN'): SettlementResult {
-  const won = outcome === trade.signal;
+function computeSettlement(trade: Trade, outcome: 'UP' | 'DOWN' | 'PUSH'): SettlementResult {
   const mode: 'paper' | 'live' = trade.mode === 'live' ? 'live' : 'paper';
+
+  if (outcome === 'PUSH') {
+    const fallbackEntryPrice = trade.signal === 'UP' ? trade.price_yes : trade.price_no;
+    const entryPrice = positiveOrNull(trade.filled_price)
+      ?? positiveOrNull(trade.requested_price)
+      ?? fallbackEntryPrice;
+    const shares = positiveOrNull(trade.filled_size)
+      ?? positiveOrNull(trade.requested_size)
+      ?? (trade.size_usdc / Math.max(entryPrice, 0.0001));
+    const feesUsdc = Math.max(0, trade.fees_usdc ?? 0);
+    return {
+      pnl: -round2(feesUsdc),
+      won: false,
+      mode,
+      entryPrice,
+      shares: round6(shares),
+      costUsdc: round6(shares * entryPrice),
+      feesUsdc: round6(feesUsdc),
+    };
+  }
+
+  const won = outcome === trade.signal;
 
   if (mode === 'paper') {
     const entryPrice = trade.signal === 'UP' ? trade.price_yes : trade.price_no;

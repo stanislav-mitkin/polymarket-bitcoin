@@ -28,6 +28,7 @@ export function executePaperTrade(
       signal: prediction.signal,
       confidence: prediction.confidence,
       edge: Math.round(edge * 10000) / 10000,
+      mode: 'paper',
       price_yes: market.priceUp,   // "Up" outcome = YES
       price_no: market.priceDown,  // "Down" outcome = NO
       size_usdc: sizeUsdc,

@@ -118,7 +118,7 @@ export async function getNextMarket(): Promise<PolyMarket5M | null> {
 }
 
 /** Resolve outcome of a closed market by its Gamma market ID */
-export async function resolveMarketOutcome(marketId: string): Promise<'UP' | 'DOWN' | null> {
+export async function resolveMarketOutcome(marketId: string): Promise<'UP' | 'DOWN' | 'PUSH' | null> {
   try {
     const url = `${GAMMA_API}/markets/${marketId}`;
     const res = await fetch(url, { headers: HEADERS });
@@ -131,8 +131,18 @@ export async function resolveMarketOutcome(marketId: string): Promise<'UP' | 'DO
       : [];
 
     // Resolved: winner token settles at 1.0
-    if (parseFloat(rawPrices[0] ?? '0') >= 0.99) return 'UP';
-    if (parseFloat(rawPrices[1] ?? '0') >= 0.99) return 'DOWN';
+    const upPrice = parseFloat(rawPrices[0] ?? '0');
+    const downPrice = parseFloat(rawPrices[1] ?? '0');
+    if (upPrice >= 0.99) return 'UP';
+    if (downPrice >= 0.99) return 'DOWN';
+
+    // Polymarket flags resolved markets via `closed` / `umaResolutionStatus`.
+    // If the market is closed but no side reached 0.99, treat as PUSH (rare —
+    // flat-tick window where Chainlink returned identical start/end price).
+    const closed = Boolean(market.closed);
+    if (closed && upPrice > 0 && downPrice > 0 && Math.abs(upPrice - downPrice) < 0.05) {
+      return 'PUSH';
+    }
 
     return null;
   } catch {

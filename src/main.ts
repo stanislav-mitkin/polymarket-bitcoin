@@ -17,15 +17,16 @@ const MIN_EDGE = 0.04;                 // Minimum edge = 4% (confidence - breake
 const tradingConfig = loadTradingConfig();
 const tradeExecutor = createTradeExecutor(tradingConfig);
 let consecutiveTickErrors = 0;
+let tickInProgress = false;
+let tickIntervalHandle: NodeJS.Timeout | null = null;
+let settleIntervalHandle: NodeJS.Timeout | null = null;
 
 async function tick(): Promise<void> {
-  if (consecutiveTickErrors >= tradingConfig.risk.maxConsecutiveTickErrors) {
-    console.error(
-      `[Bot] KILL-SWITCH: consecutive tick errors=${consecutiveTickErrors} ` +
-      `>= ${tradingConfig.risk.maxConsecutiveTickErrors}. Restart required.`
-    );
+  if (tickInProgress) {
+    console.log('[Bot] Previous tick still running — skipping this interval');
     return;
   }
+  tickInProgress = true;
 
   let tickFailed = false;
   try {
@@ -132,6 +133,19 @@ async function tick(): Promise<void> {
     );
   } finally {
     if (!tickFailed) consecutiveTickErrors = 0;
+    tickInProgress = false;
+  }
+
+  // Kill-switch: exit so PM2/operator restarts cleanly. A bare `return` left the
+  // interval firing forever with the counter latched, masking the failure.
+  if (consecutiveTickErrors >= tradingConfig.risk.maxConsecutiveTickErrors) {
+    console.error(
+      `[Bot] KILL-SWITCH: consecutive tick errors=${consecutiveTickErrors} ` +
+      `>= ${tradingConfig.risk.maxConsecutiveTickErrors}. Exiting (PM2 should restart).`
+    );
+    if (tickIntervalHandle) clearInterval(tickIntervalHandle);
+    if (settleIntervalHandle) clearInterval(settleIntervalHandle);
+    process.exit(1);
   }
 }
 
@@ -154,10 +168,10 @@ async function main(): Promise<void> {
   await tick();
 
   // Schedule recurring ticks
-  setInterval(tick, TICK_INTERVAL_MS);
+  tickIntervalHandle = setInterval(tick, TICK_INTERVAL_MS);
 
   // Separate settler interval
-  setInterval(async () => {
+  settleIntervalHandle = setInterval(async () => {
     try {
       await settleExpiredTrades();
     } catch (err) {

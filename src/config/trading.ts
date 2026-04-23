@@ -15,6 +15,7 @@ export interface LiveTradingConfig {
   privateKey?: string;
   signatureType?: 0 | 1 | 2;
   funderAddress?: string;
+  expectedSignerAddress?: string;
   maxBuyPriceImpact: number;
   minOrderSizeBufferPct: number;
 }
@@ -41,6 +42,7 @@ export function loadTradingConfig(): TradingConfig {
     privateKey: sanitizeOptional(process.env.POLY_PRIVATE_KEY),
     signatureType: parseOptionalSignatureType(process.env.POLY_SIGNATURE_TYPE),
     funderAddress: sanitizeOptional(process.env.POLY_FUNDER_ADDRESS),
+    expectedSignerAddress: sanitizeOptional(process.env.POLY_EXPECTED_SIGNER_ADDRESS),
     maxBuyPriceImpact: parsePositiveNumber(process.env.LIVE_MAX_BUY_PRICE_IMPACT, 0.03, 'LIVE_MAX_BUY_PRICE_IMPACT'),
     minOrderSizeBufferPct: parsePositiveNumber(process.env.LIVE_MIN_ORDER_BUFFER_PCT, 0.05, 'LIVE_MIN_ORDER_BUFFER_PCT'),
   };
@@ -114,6 +116,7 @@ function validateLiveConfig(config: LiveTradingConfig): void {
   if (!config.privateKey) missing.push('POLY_PRIVATE_KEY');
   if (config.signatureType === undefined) missing.push('POLY_SIGNATURE_TYPE');
   if (!config.funderAddress) missing.push('POLY_FUNDER_ADDRESS');
+  if (!config.expectedSignerAddress) missing.push('POLY_EXPECTED_SIGNER_ADDRESS');
 
   if (missing.length > 0) {
     throw new Error(

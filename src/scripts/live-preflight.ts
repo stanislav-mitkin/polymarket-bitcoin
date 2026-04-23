@@ -60,6 +60,17 @@ async function main(): Promise<void> {
   }
 
   const signer = createSigner(config.live.privateKey!);
+  const signerAddress = new Wallet(
+    config.live.privateKey!.startsWith('0x') ? config.live.privateKey! : `0x${config.live.privateKey!}`
+  ).address.toLowerCase();
+  const expected = config.live.expectedSignerAddress?.toLowerCase();
+  checks.push({
+    name: 'Signer ownership',
+    ok: Boolean(expected) && signerAddress === expected,
+    detail: expected
+      ? `signer=${signerAddress} expected=${expected}`
+      : `POLY_EXPECTED_SIGNER_ADDRESS not set; signer=${signerAddress}`,
+  });
   const chainId = config.live.chainId === 137 ? Chain.POLYGON : Chain.AMOY;
   const l1 = new ClobClient(
     config.live.host,
@@ -143,6 +154,30 @@ async function main(): Promise<void> {
       ok: market.acceptingOrders,
       detail: `id=${market.id} acceptingOrders=${market.acceptingOrders} up=${market.priceUp} down=${market.priceDown}`,
     });
+
+    // Conditional-token allowance is not required to BUY shares, but is needed
+    // to SELL them later (e.g. exit before settle). WARN-only for buy-only
+    // step-1 rollout.
+    for (const [side, tokenId] of [['UP', market.tokenIdUp], ['DOWN', market.tokenIdDown]] as const) {
+      if (!tokenId) continue;
+      try {
+        const cond = await clob.getBalanceAllowance({ asset_type: AssetType.CONDITIONAL, token_id: tokenId });
+        const condAllow = parseNumberish(cond.allowance);
+        checks.push({
+          name: `Conditional allowance (${side})`,
+          ok: true,
+          detail: condAllow !== null && condAllow > 0
+            ? `allowance=${formatAmount(condAllow)} (sells enabled)`
+            : `allowance=0 (WARN: cannot SELL this token until updated)`,
+        });
+      } catch (err) {
+        checks.push({
+          name: `Conditional allowance (${side})`,
+          ok: true,
+          detail: `WARN: lookup failed (${String(err)})`,
+        });
+      }
+    }
   }
 
   console.log('═══════════════════════════════════════════════════════════');

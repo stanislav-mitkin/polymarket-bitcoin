@@ -52,11 +52,13 @@ export class LiveTraderExecutor implements TradeExecutor {
 
     const orderBook = await client.getOrderBook(tokenId);
     const minOrderSize = parseFloat(orderBook.min_order_size);
-    const buyPrice = clamp(
-      (input.prediction.signal === 'UP' ? input.market.priceUp : input.market.priceDown) + this.config.maxBuyPriceImpact,
-      0.001,
-      0.99
-    );
+
+    // Cap buyPrice against the live bestAsk, not the cached event-level price.
+    // Otherwise a stale `priceUp` of 0.99 with a true ask of 0.50 would let us
+    // overpay all the way to 0.99 within the impact bound.
+    const fallbackPrice = input.prediction.signal === 'UP' ? input.market.priceUp : input.market.priceDown;
+    const bestAsk = parseBestAskPrice(orderBook) ?? fallbackPrice;
+    const buyPrice = clamp(bestAsk + this.config.maxBuyPriceImpact, 0.001, 0.99);
     const sizeShares = input.sizeUsdc / buyPrice;
     const minRequired = minOrderSize * (1 + this.config.minOrderSizeBufferPct);
 
@@ -72,14 +74,55 @@ export class LiveTraderExecutor implements TradeExecutor {
     const collateral = await client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     ensureEnoughCollateral(collateral, input.sizeUsdc, this.config.dryRun);
 
+    const initialStatus = this.config.dryRun ? 'DRY_RUN' : 'PENDING_SUBMIT';
+
+    // Pre-submit: persist row BEFORE network call. UNIQUE(market_id, mode) prevents
+    // double-orders on overlapping ticks; a crash mid-call still leaves a record we
+    // can reconcile by `live_order_id` later via the audit script.
+    const tradeId = saveTrade(
+      {
+        market_id: input.market.id,
+        market_end: input.market.endDateIso,
+        signal: input.prediction.signal,
+        confidence: input.prediction.confidence,
+        edge: Math.round(input.edge * 10000) / 10000,
+        mode: 'live',
+        live_order_id: null,
+        live_status: initialStatus,
+        live_error: null,
+        requested_price: buyPrice,
+        requested_size: sizeShares,
+        filled_price: null,
+        filled_size: null,
+        fees_usdc: null,
+        live_updated_at: new Date().toISOString(),
+        price_yes: input.market.priceUp,
+        price_no: input.market.priceDown,
+        size_usdc: input.sizeUsdc,
+      },
+      {
+        obi: input.features.obi,
+        tfi: input.features.tfi,
+        spread: input.features.spread,
+        funding_rate: input.features.fundingRate,
+        oi_delta: input.features.oiDelta,
+        rsi: input.features.rsi,
+        macd: input.features.macdHist,
+        atr: input.features.atr,
+        volume_delta: input.features.volumeDelta,
+        btc_trend_1h: input.features.btcTrend1h,
+        btc_price: input.features.btcPrice,
+      }
+    );
+
     let externalOrderId: string | undefined;
-    let liveStatus = this.config.dryRun ? 'DRY_RUN' : 'PENDING_SUBMIT';
-    let liveError: string | null = null;
+    let liveStatus = initialStatus;
     let filledPrice: number | null = null;
     let filledSize: number | null = null;
+
     if (this.config.dryRun) {
       console.log(
-        `[LiveTrader] DRY-RUN | market=${input.market.id} signal=${input.prediction.signal} ` +
+        `[LiveTrader] DRY-RUN | trade#${tradeId} market=${input.market.id} signal=${input.prediction.signal} ` +
         `amount=${input.sizeUsdc.toFixed(2)} token=${tokenId}`
       );
     } else {
@@ -101,52 +144,35 @@ export class LiveTraderExecutor implements TradeExecutor {
         liveStatus = extractOrderStatus(response) ?? 'POSTED';
         filledPrice = extractFilledPrice(response);
         filledSize = extractFilledSize(response);
+        updateLiveTradeMetaById(tradeId, {
+          live_order_id: externalOrderId ?? null,
+          live_status: liveStatus,
+          filled_price: filledPrice,
+          filled_size: filledSize,
+        });
         console.log(
-          `[LiveTrader] LIVE ORDER posted | market=${input.market.id} signal=${input.prediction.signal} ` +
+          `[LiveTrader] LIVE ORDER posted | trade#${tradeId} market=${input.market.id} signal=${input.prediction.signal} ` +
           `amount=${input.sizeUsdc.toFixed(2)} orderId=${externalOrderId ?? 'unknown'} status=${liveStatus}`
         );
+
+        // Force one synchronous reconcile while the response is fresh: a 5m
+        // market can settle before the next 60s tick, leaving us without VWAP.
+        if (externalOrderId) {
+          try {
+            await this.reconcileSingle(client, tradeId, input.market.id, externalOrderId);
+          } catch (err) {
+            console.warn(`[LiveTrader] Inline reconcile failed for trade#${tradeId}: ${String(err)}`);
+          }
+        }
       } catch (err) {
-        liveStatus = 'FAILED';
-        liveError = String(err);
+        const liveError = String(err);
+        updateLiveTradeMetaById(tradeId, {
+          live_status: 'FAILED',
+          live_error: liveError,
+        });
         throw err;
       }
     }
-
-    const tradeId = saveTrade(
-      {
-        market_id: input.market.id,
-        market_end: input.market.endDateIso,
-        signal: input.prediction.signal,
-        confidence: input.prediction.confidence,
-        edge: Math.round(input.edge * 10000) / 10000,
-        mode: 'live',
-        live_order_id: externalOrderId ?? null,
-        live_status: liveStatus,
-        live_error: liveError,
-        requested_price: buyPrice,
-        requested_size: sizeShares,
-        filled_price: filledPrice,
-        filled_size: filledSize,
-        fees_usdc: null,
-        live_updated_at: new Date().toISOString(),
-        price_yes: input.market.priceUp,
-        price_no: input.market.priceDown,
-        size_usdc: input.sizeUsdc,
-      },
-      {
-        obi: input.features.obi,
-        tfi: input.features.tfi,
-        spread: input.features.spread,
-        funding_rate: input.features.fundingRate,
-        oi_delta: input.features.oiDelta,
-        rsi: input.features.rsi,
-        macd: input.features.macdHist,
-        atr: input.features.atr,
-        volume_delta: input.features.volumeDelta,
-        btc_trend_1h: input.features.btcTrend1h,
-        btc_price: input.features.btcPrice,
-      }
-    );
 
     console.log(
       `[LiveTrader] Trade #${tradeId} recorded | signal=${input.prediction.signal} conf=${input.prediction.confidence} ` +
@@ -176,37 +202,67 @@ export class LiveTraderExecutor implements TradeExecutor {
     if (rows.length === 0) return;
 
     const client = await this.getClient();
+
+    // Cache market trades once per market to avoid N getTradesPaginated calls
+    // when several open trades share the same market — without this, each row
+    // pays the per-market pagination cost and a slow tick can exceed 60s.
+    const marketTradesCache = new Map<string, ClobTrade[]>();
+
     for (const row of rows) {
       if (!row.id || !row.live_order_id) continue;
       try {
-        const order = await client.getOrder(row.live_order_id);
-        const liveStatus = typeof order?.status === 'string' ? order.status.toUpperCase() : null;
-        let filledSize = parseNum(order?.size_matched);
-        let filledPrice = parseNum(order?.price);
-        let feesUsdc: number | null = null;
-
-        const trades = await fetchMarketTrades(client, row.market_id, RECONCILE_MAX_TRADE_PAGES);
-        const ownFills = trades.filter((t) => t.taker_order_id === row.live_order_id);
-        if (ownFills.length > 0) {
-          const aggregates = aggregateFills(ownFills);
-          filledSize = aggregates.totalSize > 0 ? aggregates.totalSize : filledSize;
-          filledPrice = aggregates.weightedPrice ?? filledPrice;
-          feesUsdc = aggregates.feesUsdcEstimate;
+        let cachedTrades = marketTradesCache.get(row.market_id);
+        if (!cachedTrades) {
+          cachedTrades = await fetchMarketTrades(client, row.market_id, RECONCILE_MAX_TRADE_PAGES);
+          marketTradesCache.set(row.market_id, cachedTrades);
         }
-
-        updateLiveTradeMetaById(row.id, {
-          live_status: liveStatus,
-          live_error: null,
-          filled_price: filledPrice,
-          filled_size: filledSize,
-          fees_usdc: feesUsdc,
-        });
+        await this.reconcileRowWithTrades(client, row.id, row.live_order_id, cachedTrades);
       } catch (err) {
         updateLiveTradeMetaById(row.id, {
           live_error: String(err),
         });
       }
     }
+  }
+
+  private async reconcileSingle(
+    client: ClobClient,
+    tradeId: number,
+    marketId: string,
+    orderId: string
+  ): Promise<void> {
+    const trades = await fetchMarketTrades(client, marketId, RECONCILE_MAX_TRADE_PAGES);
+    await this.reconcileRowWithTrades(client, tradeId, orderId, trades);
+  }
+
+  private async reconcileRowWithTrades(
+    client: ClobClient,
+    tradeId: number,
+    orderId: string,
+    marketTrades: ClobTrade[]
+  ): Promise<void> {
+    const order = await client.getOrder(orderId);
+    const liveStatus = typeof order?.status === 'string' ? order.status.toUpperCase() : null;
+    let filledSize = parseNum(order?.size_matched);
+    // NOTE: order.price is the LIMIT price, not the avg fill — only used as a
+    // last-resort fallback. The trades-aggregated VWAP below is authoritative.
+    let filledPrice = parseNum(order?.price);
+    let feesUsdc: number | null = null;
+
+    const ownFills = marketTrades.filter((t) => t.taker_order_id === orderId);
+    if (ownFills.length > 0) {
+      const aggregates = aggregateFills(ownFills);
+      filledSize = aggregates.totalSize > 0 ? aggregates.totalSize : filledSize;
+      filledPrice = aggregates.weightedPrice ?? filledPrice;
+      feesUsdc = aggregates.feesUsdcEstimate;
+    }
+
+    updateLiveTradeMetaById(tradeId, {
+      live_status: liveStatus,
+      filled_price: filledPrice,
+      filled_size: filledSize,
+      fees_usdc: feesUsdc,
+    });
   }
 
   private async getClient(): Promise<ClobClient> {
@@ -342,9 +398,30 @@ function extractFilledPrice(response: unknown): number | null {
 function extractFilledSize(response: unknown): number | null {
   if (!response || typeof response !== 'object') return null;
   const value = response as Record<string, unknown>;
-  const size = value['sizeMatched'] ?? value['size_matched'] ?? value['makingAmount'];
+  // `makingAmount` for a BUY is USDC notional, NOT shares — using it as a
+  // fallback yielded wildly wrong fill sizes. Only trust the explicit fields;
+  // the trades-aggregated VWAP from reconcile fills any remaining gap.
+  const size = value['sizeMatched'] ?? value['size_matched'];
   const parsed = parseFloat(String(size ?? ''));
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseBestAskPrice(orderBook: unknown): number | null {
+  if (!orderBook || typeof orderBook !== 'object') return null;
+  const asks = (orderBook as { asks?: unknown }).asks;
+  if (!Array.isArray(asks) || asks.length === 0) return null;
+  // Polymarket returns asks sorted descending; bestAsk is the LAST entry. Be
+  // defensive and pick the minimum positive price.
+  let best: number | null = null;
+  for (const level of asks) {
+    if (!level || typeof level !== 'object') continue;
+    const raw = (level as { price?: unknown }).price;
+    const price = parseFloat(String(raw ?? ''));
+    if (Number.isFinite(price) && price > 0 && (best === null || price < best)) {
+      best = price;
+    }
+  }
+  return best;
 }
 
 function aggregateFills(trades: ClobTrade[]): {
