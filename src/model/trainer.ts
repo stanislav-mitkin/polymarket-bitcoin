@@ -15,6 +15,9 @@ export type { LRModel };
 export const MIN_TRADES_FOR_TRAINING = 50;   // first retrain threshold
 export const RETRAIN_EVERY = 25;             // retrain every N new settled trades
 const DEFAULT_HALFLIFE_DAYS = 7;             // sample weight = 0.5 at this age (overridable by regime)
+const MIN_LIVE_TRADES_FOR_LIVE_ONLY = 50;    // once we have ≥50 live trades, drop paper entirely
+const PAPER_WEIGHT_SCALE = 0.3;              // paper trades are frictionless — down-weight vs live
+const PARTIAL_FILL_MIN_RATIO = 0.9;          // exclude live fills below 90% of requested size
 
 const MODEL_PATH = path.join(process.cwd(), 'data', 'model.json');
 
@@ -39,17 +42,55 @@ export function loadModel(): LRModel | null {
 interface DBRow extends RawRow {
   outcome: 'UP' | 'DOWN';
   settled_at: string;
+  mode: 'paper' | 'live';
 }
 
-function loadTrainingData(halflifeDays: number): { X: number[][]; y: number[]; weights: number[] } | null {
+function countLiveTradeable(): number {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n FROM trades t
+    JOIN snapshots s ON s.trade_id = t.id
+    WHERE t.outcome IS NOT NULL
+      AND t.mode = 'live'
+      AND UPPER(COALESCE(t.live_status, '')) IN ('MATCHED', 'FILLED')
+      AND t.filled_size IS NOT NULL AND t.requested_size IS NOT NULL
+      AND t.filled_size / t.requested_size >= ${PARTIAL_FILL_MIN_RATIO}
+      AND s.atr IS NOT NULL AND s.atr > 0
+      AND s.obi IS NOT NULL
+  `).get() as { n: number };
+  return row.n ?? 0;
+}
+
+function loadTrainingData(halflifeDays: number): {
+  X: number[][];
+  y: number[];
+  weights: number[];
+  liveOnly: boolean;
+  liveCount: number;
+  paperCount: number;
+} | null {
+  // Exclude live trades that never filled (FAILED/REJECTED/CANCELED/DRY_RUN) and
+  // partial fills below the threshold: both signals corrupt the edge estimate.
+  const liveFilter = `
+    (t.mode = 'live'
+      AND UPPER(COALESCE(t.live_status, '')) IN ('MATCHED', 'FILLED')
+      AND t.filled_size IS NOT NULL AND t.requested_size IS NOT NULL
+      AND t.filled_size / t.requested_size >= ${PARTIAL_FILL_MIN_RATIO})
+  `;
+  const paperFilter = `(t.mode = 'paper')`;
+
+  const liveCount = countLiveTradeable();
+  const liveOnly = liveCount >= MIN_LIVE_TRADES_FOR_LIVE_ONLY;
+  const modeWhere = liveOnly ? liveFilter : `(${liveFilter} OR ${paperFilter})`;
+
   const rows = db.prepare(`
-    SELECT t.outcome, t.settled_at,
+    SELECT t.outcome, t.settled_at, t.mode,
            s.obi, s.tfi, s.rsi, s.macd, s.atr,
            s.oi_delta, s.funding_rate, s.spread,
            s.volume_delta, s.btc_trend_1h
     FROM trades t
     JOIN snapshots s ON s.trade_id = t.id
     WHERE t.outcome IS NOT NULL
+      AND ${modeWhere}
       AND s.atr IS NOT NULL AND s.atr > 0
       AND s.obi IS NOT NULL
     ORDER BY t.settled_at ASC
@@ -58,19 +99,24 @@ function loadTrainingData(halflifeDays: number): { X: number[][]; y: number[]; w
   if (rows.length < MIN_TRADES_FOR_TRAINING) return null;
 
   // Time-weighted samples: exp(-age_days / halflife * ln2)
-  // Most recent trade = 1.0, trade at halflife age = 0.5, etc.
+  // Paper trades are further damped because they don't pay slippage/fees — a raw
+  // mix would teach the model that frictionless-priced signals are optimal.
   const now = Date.now();
   const ln2 = Math.log(2);
   const weights = rows.map(r => {
     const ageMs = now - new Date(r.settled_at).getTime();
     const ageDays = Math.max(0, ageMs / (24 * 60 * 60 * 1000));
-    return Math.exp(-ageDays / halflifeDays * ln2);
+    const timeWeight = Math.exp(-ageDays / halflifeDays * ln2);
+    const modeScale = r.mode === 'paper' ? PAPER_WEIGHT_SCALE : 1;
+    return timeWeight * modeScale;
   });
 
   const X = rows.map(r => extractFeatures(r));
   const y = rows.map(r => r.outcome === 'UP' ? 1 : 0);
 
-  return { X, y, weights };
+  const paperCount = rows.length - rows.filter(r => r.mode === 'live').length;
+  const liveRowCount = rows.length - paperCount;
+  return { X, y, weights, liveOnly, liveCount: liveRowCount, paperCount };
 }
 
 // ─── Train/val split (time-ordered, no shuffle) ───────────────────────────────
@@ -119,7 +165,7 @@ export function maybeRetrain(): boolean {
   const data = loadTrainingData(halflife);
   if (!data) return false;
 
-  const { X, y, weights: sampleWeights } = data;
+  const { X, y, weights: sampleWeights, liveOnly, liveCount, paperCount } = data;
   const { XTrain, yTrain, wTrain, XVal, yVal } = splitData(X, y, sampleWeights);
 
   // Normalise (fit only on train set to avoid data leakage)
@@ -127,14 +173,27 @@ export function maybeRetrain(): boolean {
   const XTrainNorm = applyNorm(XTrain, normStats);
   const XValNorm   = applyNorm(XVal,   normStats);
 
-  // Train with time-weighted samples (recent trades get higher influence)
+  // Apply class-balance weights: rebalance UP vs DOWN so a 70/30 skew doesn't
+  // collapse into "always predict UP". Formula: classWeight[c] = N / (2 * N_c).
+  const nUp = yTrain.reduce((s, v) => s + v, 0);
+  const nDown = yTrain.length - nUp;
+  const classWeightUp = nUp > 0 ? yTrain.length / (2 * nUp) : 1;
+  const classWeightDown = nDown > 0 ? yTrain.length / (2 * nDown) : 1;
+  const wTrainBalanced = wTrain.map((w, i) => w * (yTrain[i] === 1 ? classWeightUp : classWeightDown));
+
+  // Train with time-weighted samples + early stopping on val loss.
   const t0 = Date.now();
-  const { weights, bias } = trainLogisticRegression(XTrainNorm, yTrain, {
+  const trainResult = trainLogisticRegression(XTrainNorm, yTrain, {
     lr: 0.1,
     epochs: 1000,
     lambda: 0.01,
-    sampleWeights: wTrain,
+    sampleWeights: wTrainBalanced,
+    XVal: XValNorm.length > 0 ? XValNorm : undefined,
+    yVal: yVal.length > 0 ? yVal : undefined,
+    earlyStoppingPatience: 20,
+    evalEvery: 10,
   });
+  const { weights, bias } = trainResult;
 
   // Evaluate
   const train = evaluate(weights, bias, XTrainNorm, yTrain);
@@ -171,7 +230,9 @@ export function maybeRetrain(): boolean {
   console.log(
     `[Trainer] ✓ Retrained in ${Date.now() - t0}ms | ` +
     `samples=${X.length} (train=${XTrain.length}, val=${XVal.length}) | ` +
+    `live=${liveCount} paper=${paperCount}${liveOnly ? ' (live-only)' : ''} | ` +
     `halflife=${halflife}d${forceRetrain ? ' (forced by regime shift)' : ''} | ` +
+    `epochs=${trainResult.epochsRan}${trainResult.earlyStopped ? ' (early-stopped)' : ''} | ` +
     `train_acc=${(train.accuracy * 100).toFixed(1)}% val_acc=${(val.accuracy * 100).toFixed(1)}%`
   );
   console.log(

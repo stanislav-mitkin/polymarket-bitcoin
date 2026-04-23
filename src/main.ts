@@ -4,11 +4,15 @@ import { getNextMarket } from './bot/polymarket';
 import { predict, reloadModel, getModelInfo } from './model/predictor';
 import { settleExpiredTrades } from './bot/settler';
 import { startDashboard } from './dashboard/server';
-import { countOpenTrades, getConsecutiveLosses, getDailyRealizedPnl, hasTradeForMarket } from './db/database';
+import {
+  countOpenTrades, getConsecutiveLosses, getDailyRealizedPnl, hasTradeForMarket,
+  getLiveCumulativePnl, getLiveBankroll,
+} from './db/database';
 import { maybeRetrain, MIN_TRADES_FOR_TRAINING, RETRAIN_EVERY } from './model/trainer';
 import { loadRegime } from './model/regime';
 import { loadTradingConfig } from './config/trading';
 import { createTradeExecutor } from './bot/trade-executor';
+import { computePositionSize } from './bot/sizing';
 
 const TICK_INTERVAL_MS = 60_000;       // Run prediction loop every 1 minute
 const SETTLE_INTERVAL_MS = 2 * 60_000; // Check settlements every 2 minutes
@@ -72,6 +76,26 @@ async function tick(): Promise<void> {
       return;
     }
 
+    // 1e. Cumulative drawdown kill-switch (live only — paper PnL is imaginary).
+    // Protects against slow bleed: many small losses that never breach the
+    // daily cap or streak cap but still drain capital. Hard-exits so PM2 will
+    // NOT auto-recover — operator must review and reset bankroll intentionally.
+    if (tradingConfig.mode === 'live') {
+      const cumulativePnl = getLiveCumulativePnl();
+      const { initialBankrollUsdc, maxDrawdownPct } = tradingConfig.risk;
+      const drawdownPct = -cumulativePnl / initialBankrollUsdc;
+      if (drawdownPct >= maxDrawdownPct) {
+        console.error(
+          `[Bot] KILL-SWITCH: cumulative drawdown=${(drawdownPct * 100).toFixed(2)}% ` +
+          `>= ${(maxDrawdownPct * 100).toFixed(2)}% of initial bankroll $${initialBankrollUsdc.toFixed(2)}. ` +
+          `Cumulative PnL=$${cumulativePnl.toFixed(2)}. Exiting — operator intervention required.`
+        );
+        if (tickIntervalHandle) clearInterval(tickIntervalHandle);
+        if (settleIntervalHandle) clearInterval(settleIntervalHandle);
+        process.exit(1);
+      }
+    }
+
     // 2. Find the next active market
     const market = await getNextMarket();
     if (!market) {
@@ -116,13 +140,36 @@ async function tick(): Promise<void> {
       return;
     }
 
-    // 7. Execute trade (paper or live)
+    // 7. Size the position. Paper mode keeps the legacy fixed TRADE_SIZE_USDC
+    // so historical virtual comparisons stay apples-to-apples; live mode uses
+    // half-Kelly with loss-damping on the current bankroll.
+    let sizeUsdc = tradingConfig.tradeSizeUsdc;
+    if (tradingConfig.mode === 'live') {
+      const bankroll = getLiveBankroll(tradingConfig.risk.initialBankrollUsdc);
+      const sizing = computePositionSize(
+        {
+          bankrollUsdc: bankroll,
+          consecutiveLosses,
+          confidence: prediction.confidence,
+          edge,
+        },
+        tradingConfig.risk,
+      );
+      sizeUsdc = sizing.sizeUsdc;
+      console.log(
+        `[Bot] SIZE | bankroll=$${bankroll.toFixed(2)} kelly=${sizing.kellyFraction.toFixed(3)} ` +
+        `base=$${sizing.baseSize.toFixed(2)} damp=${sizing.dampening.toFixed(2)} ` +
+        `losses=${consecutiveLosses} → size=$${sizeUsdc.toFixed(2)}`
+      );
+    }
+
+    // 8. Execute trade (paper or live)
     await tradeExecutor.execute({
       market,
       prediction,
       features,
       edge,
-      sizeUsdc: tradingConfig.tradeSizeUsdc,
+      sizeUsdc,
     });
   } catch (err) {
     tickFailed = true;
@@ -190,10 +237,21 @@ async function main(): Promise<void> {
     `[Bot] Risk limits | maxOpen=${tradingConfig.risk.maxOpenPositions} ` +
     `maxDailyLoss=$${tradingConfig.risk.maxDailyLossUsdc.toFixed(2)} ` +
     `maxConsecLoss=${tradingConfig.risk.maxConsecutiveLosses} ` +
-    `maxTickErr=${tradingConfig.risk.maxConsecutiveTickErrors}`
+    `maxTickErr=${tradingConfig.risk.maxConsecutiveTickErrors} ` +
+    `maxDrawdown=${(tradingConfig.risk.maxDrawdownPct * 100).toFixed(0)}%`
   );
   if (tradingConfig.mode === 'live') {
-    console.log(`[Bot] Live dry-run=${tradingConfig.live.dryRun} | host=${tradingConfig.live.host}`);
+    const cumulativePnl = getLiveCumulativePnl();
+    const bankroll = tradingConfig.risk.initialBankrollUsdc + cumulativePnl;
+    console.log(
+      `[Bot] Live bankroll=$${bankroll.toFixed(2)} (initial=$${tradingConfig.risk.initialBankrollUsdc.toFixed(2)}, ` +
+      `cumPnl=$${cumulativePnl.toFixed(2)}) | sizing: base=${(tradingConfig.risk.basePositionPct * 100).toFixed(1)}% ` +
+      `min=$${tradingConfig.risk.minPositionUsdc} max=$${tradingConfig.risk.maxPositionUsdc} ` +
+      `lossDamp=${tradingConfig.risk.lossDampFactor}/loss`
+    );
+    console.log(
+      `[Bot] Live dry-run=${tradingConfig.live.dryRun} | confirmed=${tradingConfig.live.tradingConfirmed} | host=${tradingConfig.live.host}`
+    );
   }
   console.log('[Bot] Running. Dashboard: http://localhost:3000');
 }

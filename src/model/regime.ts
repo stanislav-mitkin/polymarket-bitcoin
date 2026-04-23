@@ -3,6 +3,21 @@ import path from 'path';
 
 const REGIME_PATH = path.join(process.cwd(), 'data', 'regime.json');
 
+export interface CalibrationBin {
+  lo: number;             // lower edge of confidence bin (inclusive)
+  hi: number;             // upper edge of confidence bin (exclusive)
+  n: number;              // trades in this bin
+  predicted: number | null;  // mean predicted confidence, null if n=0
+  actual: number | null;     // actual win rate, null if n=0
+}
+
+export interface CalibrationReport {
+  n: number;                     // total trades used
+  bins: CalibrationBin[];
+  worstBinShift: number;         // max |predicted - actual| across bins with n ≥ minN
+  driftDetected: boolean;        // worstBinShift > threshold and enough samples
+}
+
 export interface RegimeState {
   updatedAt: string;
 
@@ -24,6 +39,9 @@ export interface RegimeState {
   forceRetrain: boolean;         // next maybeRetrain() will bypass RETRAIN_EVERY
   pauseTrading: boolean;         // main loop skips new trades
   reason: string;                // human-readable explanation
+
+  // Optional: calibration diagnostics (null if insufficient live-trade data)
+  calibration?: CalibrationReport | null;
 }
 
 export function loadRegime(): RegimeState | null {

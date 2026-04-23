@@ -25,6 +25,8 @@ type GeoblockStatus = {
 const GEOBLOCK_URL = 'https://polymarket.com/api/geoblock';
 const GEOBLOCK_TTL_MS = 5 * 60_000;
 const RECONCILE_MAX_TRADE_PAGES = 5;
+const ORDER_SUBMIT_TIMEOUT_MS = 15_000;   // CLOB must respond in 15s or we bail
+const RECONCILE_TIMEOUT_MS = 10_000;      // Per-market fill fetch hard cap
 const HTTP_HEADERS = {
   Accept: 'application/json',
   'User-Agent': 'Mozilla/5.0 (compatible; polymarket-bot/1.0)',
@@ -127,18 +129,22 @@ export class LiveTraderExecutor implements TradeExecutor {
       );
     } else {
       try {
-        const response = await client.createAndPostMarketOrder(
-          {
-            tokenID: tokenId,
-            amount: input.sizeUsdc,
-            side: Side.BUY,
-            price: buyPrice,
-          },
-          {
-            tickSize: orderBook.tick_size as TickSize,
-            negRisk: orderBook.neg_risk,
-          },
-          OrderType.FAK
+        const response = await withTimeout(
+          client.createAndPostMarketOrder(
+            {
+              tokenID: tokenId,
+              amount: input.sizeUsdc,
+              side: Side.BUY,
+              price: buyPrice,
+            },
+            {
+              tickSize: orderBook.tick_size as TickSize,
+              negRisk: orderBook.neg_risk,
+            },
+            OrderType.FAK
+          ),
+          ORDER_SUBMIT_TIMEOUT_MS,
+          'createAndPostMarketOrder'
         );
         externalOrderId = extractOrderId(response);
         liveStatus = extractOrderStatus(response) ?? 'POSTED';
@@ -157,9 +163,16 @@ export class LiveTraderExecutor implements TradeExecutor {
 
         // Force one synchronous reconcile while the response is fresh: a 5m
         // market can settle before the next 60s tick, leaving us without VWAP.
+        // Wrapped in a hard timeout so a slow CLOB can't stall the tick loop —
+        // if inline reconcile times out, the periodic reconcileOpenTrades()
+        // will pick it up on the next tick.
         if (externalOrderId) {
           try {
-            await this.reconcileSingle(client, tradeId, input.market.id, externalOrderId);
+            await withTimeout(
+              this.reconcileSingle(client, tradeId, input.market.id, externalOrderId),
+              RECONCILE_TIMEOUT_MS,
+              'reconcileSingle',
+            );
           } catch (err) {
             console.warn(`[LiveTrader] Inline reconcile failed for trade#${tradeId}: ${String(err)}`);
           }
@@ -213,10 +226,18 @@ export class LiveTraderExecutor implements TradeExecutor {
       try {
         let cachedTrades = marketTradesCache.get(row.market_id);
         if (!cachedTrades) {
-          cachedTrades = await fetchMarketTrades(client, row.market_id, RECONCILE_MAX_TRADE_PAGES);
+          cachedTrades = await withTimeout(
+            fetchMarketTrades(client, row.market_id, RECONCILE_MAX_TRADE_PAGES),
+            RECONCILE_TIMEOUT_MS,
+            `fetchMarketTrades(${row.market_id})`,
+          );
           marketTradesCache.set(row.market_id, cachedTrades);
         }
-        await this.reconcileRowWithTrades(client, row.id, row.live_order_id, cachedTrades);
+        await withTimeout(
+          this.reconcileRowWithTrades(client, row.id, row.live_order_id, cachedTrades),
+          RECONCILE_TIMEOUT_MS,
+          `reconcileRow(trade#${row.id})`,
+        );
       } catch (err) {
         updateLiveTradeMetaById(row.id, {
           live_error: String(err),
@@ -483,4 +504,14 @@ async function fetchMarketTrades(client: ClobClient, marketId: string, maxPages:
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms: ${label}`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
 }

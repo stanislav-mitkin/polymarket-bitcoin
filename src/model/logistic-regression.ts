@@ -118,30 +118,65 @@ export interface TrainOpts {
   epochs?: number;           // gradient steps (default 1000)
   lambda?: number;           // L2 coefficient (default 0.01)
   sampleWeights?: number[];  // per-sample weights, length = N (default: all 1.0)
+  // Early stopping: if XVal/yVal provided, val loss is checked every `evalEvery`
+  // epochs. Best weights are kept; training halts after `earlyStoppingPatience`
+  // evaluations without improvement. Without val data these are ignored.
+  XVal?: number[][];
+  yVal?: number[];
+  earlyStoppingPatience?: number; // default 20 evaluations
+  evalEvery?: number;             // default 10 epochs
+}
+
+export interface TrainResult {
+  weights: number[];
+  bias: number;
+  epochsRan: number;
+  earlyStopped: boolean;
+  bestValLoss: number | null;
 }
 
 /**
  * Trains binary logistic regression via gradient descent with L2 regularisation.
  * Optionally accepts `sampleWeights` to weight each training sample — useful for
  * giving recent trades more influence than old ones (market regime adaptation).
+ *
+ * If val data is supplied, uses early stopping on val loss with best-weight
+ * checkpointing. Otherwise runs full `epochs` and returns the final weights.
  */
 export function trainLogisticRegression(
   X: number[][],
   y: number[],
   opts: TrainOpts = {}
-): { weights: number[]; bias: number } {
-  const { lr = 0.1, epochs = 1000, lambda = 0.01, sampleWeights } = opts;
+): TrainResult {
+  const {
+    lr = 0.1,
+    epochs = 1000,
+    lambda = 0.01,
+    sampleWeights,
+    XVal,
+    yVal,
+    earlyStoppingPatience = 20,
+    evalEvery = 10,
+  } = opts;
   const N = X.length;
   const D = X[0].length;
 
-  // Default weights = 1.0 for every sample
   const wSample = sampleWeights ?? new Array(N).fill(1);
   const totalWeight = wSample.reduce((s, v) => s + v, 0);
 
   const w = new Array(D).fill(0);
   let b = 0;
 
+  const canEarlyStop = Array.isArray(XVal) && Array.isArray(yVal) && XVal.length > 0 && yVal.length === XVal.length;
+  let bestValLoss: number | null = null;
+  let bestW: number[] = w.slice();
+  let bestB = b;
+  let evaluationsWithoutImprovement = 0;
+  let earlyStopped = false;
+  let epochsRan = 0;
+
   for (let epoch = 0; epoch < epochs; epoch++) {
+    epochsRan = epoch + 1;
     const dw = new Array(D).fill(0);
     let db = 0;
 
@@ -156,9 +191,30 @@ export function trainLogisticRegression(
       w[j] -= lr * (dw[j] / totalWeight + lambda * w[j]); // gradient + L2
     }
     b -= lr * (db / totalWeight); // bias: no L2 penalty
+
+    if (canEarlyStop && (epoch + 1) % evalEvery === 0) {
+      const probs = XVal!.map(x => sigmoid(dot(w, x) + b));
+      const valLoss = binaryCrossEntropy(yVal!, probs);
+
+      if (bestValLoss === null || valLoss < bestValLoss - 1e-6) {
+        bestValLoss = valLoss;
+        bestW = w.slice();
+        bestB = b;
+        evaluationsWithoutImprovement = 0;
+      } else {
+        evaluationsWithoutImprovement += 1;
+        if (evaluationsWithoutImprovement >= earlyStoppingPatience) {
+          earlyStopped = true;
+          break;
+        }
+      }
+    }
   }
 
-  return { weights: w, bias: b };
+  if (canEarlyStop && bestValLoss !== null) {
+    return { weights: bestW, bias: bestB, epochsRan, earlyStopped, bestValLoss };
+  }
+  return { weights: w, bias: b, epochsRan, earlyStopped: false, bestValLoss };
 }
 
 // ── Inference ─────────────────────────────────────────────────────────────────

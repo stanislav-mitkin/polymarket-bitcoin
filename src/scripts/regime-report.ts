@@ -12,7 +12,7 @@
  */
 
 import db from '../db/database';
-import { saveRegime, type RegimeState } from '../model/regime';
+import { saveRegime, type CalibrationBin, type CalibrationReport, type RegimeState } from '../model/regime';
 
 // ── Tunables ──────────────────────────────────────────────────────────────
 const DEFAULT_HALFLIFE = 7;             // days — matches trainer.ts baseline
@@ -21,6 +21,13 @@ const SHIFT_THRESHOLD_WR = 0.08;        // 8 pp gap between 7d and 30d winrate
 const PAUSE_EDGE_THRESHOLD = -0.02;     // realized edge < -2%
 const PAUSE_MIN_N = 20;                 // need ≥20 recent trades before pausing
 const DAILY_LIMIT = 30;                 // days in the per-day breakdown
+
+// Calibration diagnostics
+const CAL_LOOKBACK_TRADES = 100;        // last N live trades used for reliability diagram
+const CAL_BIN_EDGES = [0.55, 0.60, 0.65, 0.70, 0.75, 0.85, 1.0]; // inclusive-exclusive pairs
+const CAL_MIN_N_PER_BIN = 8;            // ignore bins with <N samples (noise)
+const CAL_MIN_TOTAL_N = 30;             // skip calibration entirely below this
+const CAL_DRIFT_THRESHOLD = 0.10;       // pause if any bin predicts 10pp too high
 
 // ── DB rows ───────────────────────────────────────────────────────────────
 interface AggRow {
@@ -69,11 +76,71 @@ function perDayBreakdown(limit: number): DayRow[] {
   `).all(limit) as DayRow[];
 }
 
+// ── Calibration ───────────────────────────────────────────────────────────
+
+interface CalRow {
+  confidence: number;
+  won: number;  // 0/1
+}
+
+function loadRecentLiveCalibrationRows(limit: number): CalRow[] {
+  // Only live, filled trades — paper is frictionless, FAILED/REJECTED have no
+  // position. Using `outcome = signal` as the win indicator handles both UP
+  // and DOWN bets; PUSH is excluded because it doesn't test directional skill.
+  return db.prepare(`
+    SELECT confidence,
+           CASE WHEN outcome = signal THEN 1 ELSE 0 END AS won
+    FROM trades
+    WHERE mode = 'live'
+      AND outcome IS NOT NULL
+      AND outcome IN ('UP', 'DOWN')
+      AND UPPER(COALESCE(live_status, '')) IN ('MATCHED', 'FILLED')
+      AND confidence IS NOT NULL
+    ORDER BY datetime(settled_at) DESC, id DESC
+    LIMIT ?
+  `).all(limit) as CalRow[];
+}
+
+function computeCalibration(): CalibrationReport | null {
+  const rows = loadRecentLiveCalibrationRows(CAL_LOOKBACK_TRADES);
+  if (rows.length < CAL_MIN_TOTAL_N) return null;
+
+  const bins: CalibrationBin[] = [];
+  let worstBinShift = 0;
+
+  for (let i = 0; i < CAL_BIN_EDGES.length - 1; i++) {
+    const lo = CAL_BIN_EDGES[i];
+    const hi = CAL_BIN_EDGES[i + 1];
+    const inBin = rows.filter(r => r.confidence >= lo && r.confidence < hi);
+    const n = inBin.length;
+    const predicted = n > 0 ? inBin.reduce((s, r) => s + r.confidence, 0) / n : null;
+    const actual = n > 0 ? inBin.reduce((s, r) => s + r.won, 0) / n : null;
+
+    bins.push({ lo, hi, n, predicted, actual });
+
+    // Only count shifts where prediction > actual (overconfidence) and bin has
+    // enough samples. Under-confidence is a smaller concern — we lose upside
+    // but don't over-bet on bad signals.
+    if (n >= CAL_MIN_N_PER_BIN && predicted !== null && actual !== null) {
+      const shift = predicted - actual;
+      if (shift > worstBinShift) worstBinShift = shift;
+    }
+  }
+
+  return {
+    n: rows.length,
+    bins,
+    worstBinShift: Math.round(worstBinShift * 10000) / 10000,
+    driftDetected: worstBinShift > CAL_DRIFT_THRESHOLD,
+  };
+}
+
 // ── Regime logic ──────────────────────────────────────────────────────────
 
 function computeRegime(): RegimeState {
   const a7  = aggregateLastDays(7);
   const a30 = aggregateLastDays(30);
+  const calibration = computeCalibration();
 
   const wr7d  = a7.n  > 0 ? (a7.wins  ?? 0) / a7.n  : null;
   const wr30d = a30.n > 0 ? (a30.wins ?? 0) / a30.n : null;
@@ -90,18 +157,25 @@ function computeRegime(): RegimeState {
     Math.abs(wr7d - wr30d) > SHIFT_THRESHOLD_WR
   );
 
-  // Pause trading when losing money over enough samples.
+  // Pause trading when losing money over enough samples OR when calibration
+  // drift indicates the model's confidence no longer matches reality (i.e.
+  // posted edge is mirage). Either condition → pause + force retrain.
+  const calibrationDrift = calibration?.driftDetected === true;
   const pauseTrading = (
-    realizedEdge7d !== null &&
-    a7.n >= PAUSE_MIN_N &&
-    realizedEdge7d < PAUSE_EDGE_THRESHOLD
+    (realizedEdge7d !== null && a7.n >= PAUSE_MIN_N && realizedEdge7d < PAUSE_EDGE_THRESHOLD) ||
+    calibrationDrift
   );
 
-  const recommendedHalflife = shiftDetected ? SHIFTED_HALFLIFE : DEFAULT_HALFLIFE;
+  const recommendedHalflife = (shiftDetected || calibrationDrift) ? SHIFTED_HALFLIFE : DEFAULT_HALFLIFE;
 
   const reasons: string[] = [];
   if (shiftDetected)  reasons.push(`shift Δwr=${((wr7d! - wr30d!) * 100).toFixed(1)}pp`);
-  if (pauseTrading)   reasons.push(`pause edge7d=${(realizedEdge7d! * 100).toFixed(1)}%`);
+  if (realizedEdge7d !== null && a7.n >= PAUSE_MIN_N && realizedEdge7d < PAUSE_EDGE_THRESHOLD) {
+    reasons.push(`pause edge7d=${(realizedEdge7d * 100).toFixed(1)}%`);
+  }
+  if (calibrationDrift) {
+    reasons.push(`calibration-drift=${(calibration!.worstBinShift * 100).toFixed(1)}pp`);
+  }
   if (reasons.length === 0) reasons.push('stable');
 
   return {
@@ -112,9 +186,10 @@ function computeRegime(): RegimeState {
     totalPnl7d: Math.round((a7.total_pnl ?? 0) * 100) / 100,
     shiftDetected,
     recommendedHalflife,
-    forceRetrain: shiftDetected, // shift → retrain next tick, don't wait for +25 trades
+    forceRetrain: shiftDetected || calibrationDrift, // both conditions warrant immediate retrain
     pauseTrading,
     reason: reasons.join(' | '),
+    calibration: calibration ?? null,
   };
 }
 
@@ -134,6 +209,25 @@ function printReport(state: RegimeState, days: DayRow[]): void {
   console.log(`  Halflife (days):     ${state.recommendedHalflife}`);
   console.log(`  Force retrain:       ${state.forceRetrain ? 'YES' : 'no'}`);
   console.log(`  Reason:              ${state.reason}`);
+
+  if (state.calibration) {
+    const c = state.calibration;
+    console.log('');
+    console.log(`  Calibration (last ${c.n} live):  worst overconfidence=${(c.worstBinShift * 100).toFixed(1)}pp  drift=${c.driftDetected ? 'YES' : 'no'}`);
+    console.log('  bin          n    predicted  actual  Δ');
+    console.log('  ──────────  ───  ─────────  ──────  ─────');
+    for (const b of c.bins) {
+      if (b.n === 0) continue;
+      const deltaStr = (b.predicted !== null && b.actual !== null)
+        ? `${((b.predicted - b.actual) * 100).toFixed(1).padStart(5)}pp`
+        : '   —  ';
+      console.log(
+        `  [${b.lo.toFixed(2)}, ${b.hi.toFixed(2)})  ${b.n.toString().padStart(3)}  ` +
+        `${b.predicted !== null ? (b.predicted * 100).toFixed(1).padStart(8) + '%' : '     —  '}  ` +
+        `${b.actual !== null ? (b.actual * 100).toFixed(1).padStart(5) + '%' : '   —  '}  ${deltaStr}`
+      );
+    }
+  }
 
   if (days.length > 0) {
     console.log('');

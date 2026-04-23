@@ -325,16 +325,33 @@ export function getDailyRealizedPnl(): number {
 }
 
 export function getConsecutiveLosses(): number {
+  // Count backwards from the most recent settled trade until a non-loss breaks
+  // the streak. Using pnl (rather than signal == outcome) handles: PUSH (fees
+  // only, pnl ≤ 0 but not a directional loss), partial fills on live trades
+  // (pnl scales with filled_size), and any future outcome variants.
   const rows = db.prepare(
-    `SELECT signal, outcome FROM trades WHERE outcome IS NOT NULL ORDER BY datetime(settled_at) DESC, id DESC LIMIT 200`
-  ).all() as Array<{ signal: 'UP' | 'DOWN'; outcome: 'UP' | 'DOWN' }>;
+    `SELECT pnl FROM trades WHERE outcome IS NOT NULL AND pnl IS NOT NULL
+     ORDER BY datetime(settled_at) DESC, id DESC LIMIT 200`
+  ).all() as Array<{ pnl: number }>;
 
   let losses = 0;
   for (const row of rows) {
-    if (row.signal === row.outcome) break;
+    if (row.pnl >= 0) break; // wins and PUSH-with-zero-fees stop the streak
     losses += 1;
   }
   return losses;
+}
+
+export function getLiveCumulativePnl(): number {
+  const row = db.prepare(
+    `SELECT ROUND(COALESCE(SUM(pnl), 0), 6) AS pnl FROM trades
+     WHERE mode = 'live' AND outcome IS NOT NULL AND pnl IS NOT NULL`
+  ).get() as { pnl: number | null };
+  return row.pnl ?? 0;
+}
+
+export function getLiveBankroll(initialUsdc: number): number {
+  return initialUsdc + getLiveCumulativePnl();
 }
 
 export type LiveTradeReconcileRow = Pick<

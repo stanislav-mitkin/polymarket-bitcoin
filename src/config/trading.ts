@@ -10,6 +10,7 @@ export interface TradingConfig {
 export interface LiveTradingConfig {
   enabled: boolean;
   dryRun: boolean;
+  tradingConfirmed: boolean;
   host: string;
   chainId: 137 | 80002;
   privateKey?: string;
@@ -25,6 +26,12 @@ export interface RiskConfig {
   maxDailyLossUsdc: number;
   maxConsecutiveLosses: number;
   maxConsecutiveTickErrors: number;
+  initialBankrollUsdc: number;
+  maxDrawdownPct: number;         // fraction (0.20 = 20%) of initial bankroll
+  basePositionPct: number;        // fraction of current bankroll staked baseline
+  minPositionUsdc: number;
+  maxPositionUsdc: number;
+  lossDampFactor: number;         // size reduction per consecutive loss
 }
 
 const DEFAULT_CLOB_HOST = 'https://clob.polymarket.com';
@@ -37,6 +44,7 @@ export function loadTradingConfig(): TradingConfig {
   const live: LiveTradingConfig = {
     enabled: mode === 'live',
     dryRun: parseBoolean(process.env.LIVE_DRY_RUN, true),
+    tradingConfirmed: parseBoolean(process.env.LIVE_TRADING_CONFIRMED, false),
     host: process.env.POLY_CLOB_HOST?.trim() || DEFAULT_CLOB_HOST,
     chainId,
     privateKey: sanitizeOptional(process.env.POLY_PRIVATE_KEY),
@@ -51,6 +59,12 @@ export function loadTradingConfig(): TradingConfig {
     maxDailyLossUsdc: parsePositiveNumber(process.env.MAX_DAILY_LOSS_USDC, 5, 'MAX_DAILY_LOSS_USDC'),
     maxConsecutiveLosses: parsePositiveInteger(process.env.MAX_CONSECUTIVE_LOSSES, 4, 'MAX_CONSECUTIVE_LOSSES'),
     maxConsecutiveTickErrors: parsePositiveInteger(process.env.MAX_CONSECUTIVE_TICK_ERRORS, 5, 'MAX_CONSECUTIVE_TICK_ERRORS'),
+    initialBankrollUsdc: parsePositiveNumber(process.env.INITIAL_BANKROLL_USDC, 100, 'INITIAL_BANKROLL_USDC'),
+    maxDrawdownPct: parseFraction(process.env.MAX_DRAWDOWN_PCT, 0.20, 'MAX_DRAWDOWN_PCT'),
+    basePositionPct: parseFraction(process.env.BASE_POSITION_PCT, 0.02, 'BASE_POSITION_PCT'),
+    minPositionUsdc: parsePositiveNumber(process.env.MIN_POSITION_USDC, 5, 'MIN_POSITION_USDC'),
+    maxPositionUsdc: parsePositiveNumber(process.env.MAX_POSITION_USDC, 25, 'MAX_POSITION_USDC'),
+    lossDampFactor: parseFraction(process.env.LOSS_DAMP_FACTOR, 0.25, 'LOSS_DAMP_FACTOR'),
   };
 
   if (mode === 'live') validateLiveConfig(live);
@@ -104,6 +118,15 @@ function parsePositiveInteger(raw: string | undefined, fallback: number, envName
   return value;
 }
 
+function parseFraction(raw: string | undefined, fallback: number, envName: string): number {
+  if (!raw || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new Error(`Invalid ${envName}="${raw}". Expected a fraction in (0, 1).`);
+  }
+  return value;
+}
+
 function sanitizeOptional(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const value = raw.trim();
@@ -121,6 +144,16 @@ function validateLiveConfig(config: LiveTradingConfig): void {
   if (missing.length > 0) {
     throw new Error(
       `TRADING_MODE=live requires: ${missing.join(', ')}`
+    );
+  }
+
+  // Real-money guard: posting live orders requires explicit opt-in beyond just
+  // flipping LIVE_DRY_RUN. This prevents an accidental edit from firing real
+  // trades without the operator acknowledging it.
+  if (!config.dryRun && !config.tradingConfirmed) {
+    throw new Error(
+      'LIVE_DRY_RUN=false but LIVE_TRADING_CONFIRMED is not set. ' +
+      'Set LIVE_TRADING_CONFIRMED=true to authorize real-money orders.'
     );
   }
 }
