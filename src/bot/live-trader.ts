@@ -341,10 +341,6 @@ function ensureEnoughCollateral(collateral: BalanceAllowanceResponse, amountUsdc
   if (balance === null) {
     throw new Error(`Invalid collateral balance value: ${String(collateral.balance)}`);
   }
-  if (allowance === null && !dryRun) {
-    throw new Error(`Invalid collateral allowance value: ${String(collateral.allowance)}`);
-  }
-
   if (balance < amountUsdc) {
     throw new Error(`Insufficient collateral balance: ${balance.toFixed(4)} < ${amountUsdc.toFixed(4)} USDC.`);
   }
@@ -352,9 +348,12 @@ function ensureEnoughCollateral(collateral: BalanceAllowanceResponse, amountUsdc
     throw new Error(`Insufficient collateral allowance: ${allowance.toFixed(4)} < ${amountUsdc.toFixed(4)} USDC.`);
   }
 
-  if (allowance === null && dryRun) {
+  // Proxy/managed accounts (signature_type=1) often return undefined allowance via the API
+  // even when on-chain approval is set. Warn and proceed if balance is sufficient.
+  if (allowance === null) {
     console.warn(
-      `[LiveTrader] WARN: collateral allowance is not numeric (${String(collateral.allowance)}). Allowed in dry-run only.`
+      `[LiveTrader] WARN: collateral allowance is not numeric (${String(collateral.allowance)}). ` +
+      `Balance=${balance.toFixed(4)} is sufficient — proceeding (proxy account assumed).`
     );
   }
 }
