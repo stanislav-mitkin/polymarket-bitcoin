@@ -138,7 +138,7 @@ export class LiveTraderExecutor implements TradeExecutor {
             tickSize: orderBook.tick_size as TickSize,
             negRisk: orderBook.neg_risk,
           },
-          OrderType.FOK
+          OrderType.FAK
         );
         externalOrderId = extractOrderId(response);
         liveStatus = extractOrderStatus(response) ?? 'POSTED';
