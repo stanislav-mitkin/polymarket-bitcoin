@@ -75,6 +75,9 @@ const SCHEMA_VERSION = 1;
 {
   const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
   if ((row?.user_version ?? 0) < SCHEMA_VERSION) {
+    // Foreign keys must be disabled outside the transaction — SQLite ignores
+    // PRAGMA foreign_keys changes made inside a transaction.
+    db.pragma('foreign_keys = OFF');
     db.exec(`
       BEGIN;
       ALTER TABLE trades RENAME TO trades_old;
@@ -119,6 +122,7 @@ const SCHEMA_VERSION = 1;
       PRAGMA user_version = ${SCHEMA_VERSION};
       COMMIT;
     `);
+    db.pragma('foreign_keys = ON');
   }
 }
 
