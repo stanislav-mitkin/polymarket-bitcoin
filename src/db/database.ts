@@ -493,6 +493,7 @@ export function getStats(): TradeStats {
       ROUND(SUM(COALESCE(pnl, 0)), 2)                   AS total_pnl,
       SUM(size_usdc)                                    AS total_wagered
     FROM trades
+    WHERE mode = 'paper'
   `).get() as any;
 
   const winRate = row.settled > 0 ? Math.round((row.wins / row.settled) * 10000) / 100 : 0;
@@ -501,6 +502,36 @@ export function getStats(): TradeStats {
   return {
     total: row.total,
     settled: row.settled,
+    wins: row.wins ?? 0,
+    losses: row.losses ?? 0,
+    win_rate: winRate,
+    total_pnl: row.total_pnl ?? 0,
+    roi_pct: roi,
+    avg_confidence: row.avg_confidence ?? 0,
+  };
+}
+
+export function getLiveStats(): TradeStats {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*)                                          AS total,
+      COUNT(outcome)                                    AS settled,
+      SUM(CASE WHEN outcome = signal THEN 1 ELSE 0 END) AS wins,
+      SUM(CASE WHEN outcome IS NOT NULL AND outcome != signal THEN 1 ELSE 0 END) AS losses,
+      ROUND(AVG(confidence), 4)                         AS avg_confidence,
+      ROUND(SUM(COALESCE(pnl, 0)), 2)                   AS total_pnl,
+      SUM(COALESCE(filled_price, size_usdc) * COALESCE(filled_size, 1)) AS total_wagered
+    FROM trades
+    WHERE mode = 'live'
+      AND UPPER(COALESCE(live_status, '')) IN ('MATCHED', 'FILLED')
+  `).get() as any;
+
+  const winRate = row.settled > 0 ? Math.round((row.wins / row.settled) * 10000) / 100 : 0;
+  const roi = row.total_wagered > 0 ? Math.round((row.total_pnl / row.total_wagered) * 10000) / 100 : 0;
+
+  return {
+    total: row.total ?? 0,
+    settled: row.settled ?? 0,
     wins: row.wins ?? 0,
     losses: row.losses ?? 0,
     win_rate: winRate,

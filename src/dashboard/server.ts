@@ -1,6 +1,6 @@
 import express from 'express';
 import path from 'path';
-import { getStats, getRecentTrades, getPnlTimeline } from '../db/database';
+import { getStats, getLiveStats, getRecentTrades, getPnlTimeline } from '../db/database';
 import { loadModel } from '../model/trainer';
 
 const app = express();
@@ -14,6 +14,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/stats', (_req, res) => {
   try {
     res.json(getStats());
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.get('/api/stats/live', (_req, res) => {
+  try {
+    res.json(getLiveStats());
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }

@@ -187,6 +187,18 @@
     <div class="stat-card"><div class="label">Avg Confidence</div><div class="value neutral" id="stat-conf">—</div></div>
   </div>
 
+  <!-- Live trading stats -->
+  <div style="background:#1a1d2e;border:1px solid #4a5568;border-radius:12px;padding:18px 22px;margin-bottom:24px;">
+    <div style="font-size:0.72rem;color:#f6ad55;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:14px;font-weight:700;">💸 Live Trading (real money)</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:16px;">
+      <div><div style="font-size:0.7rem;color:#718096;text-transform:uppercase;margin-bottom:4px;">Trades</div><div style="font-size:1.4rem;font-weight:700;color:#e2e8f0" id="live-total">—</div></div>
+      <div><div style="font-size:0.7rem;color:#718096;text-transform:uppercase;margin-bottom:4px;">Settled</div><div style="font-size:1.4rem;font-weight:700;color:#e2e8f0" id="live-settled">—</div></div>
+      <div><div style="font-size:0.7rem;color:#718096;text-transform:uppercase;margin-bottom:4px;">Win Rate</div><div style="font-size:1.4rem;font-weight:700" id="live-winrate">—</div></div>
+      <div><div style="font-size:0.7rem;color:#718096;text-transform:uppercase;margin-bottom:4px;">Real P&L</div><div style="font-size:1.4rem;font-weight:700" id="live-pnl">—</div></div>
+      <div><div style="font-size:0.7rem;color:#718096;text-transform:uppercase;margin-bottom:4px;">ROI</div><div style="font-size:1.4rem;font-weight:700" id="live-roi">—</div></div>
+    </div>
+  </div>
+
   <!-- ML Model status panel -->
   <div id="model-panel" style="background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:18px 22px;margin-bottom:24px;display:flex;align-items:flex-start;gap:32px;flex-wrap:wrap;">
     <div>
@@ -247,7 +259,10 @@
     let winLossChart = null;
 
     async function loadStats() {
-      const s = await fetch('/api/stats').then(r => r.json());
+      const [s, ls] = await Promise.all([
+        fetch('/api/stats').then(r => r.json()),
+        fetch('/api/stats/live').then(r => r.json()),
+      ]);
 
       const pnl = s.total_pnl ?? 0;
       const roi = s.roi_pct ?? 0;
@@ -258,6 +273,19 @@
       setColored('stat-pnl', (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' USDC', pnl >= 0 ? 'positive' : 'negative');
       setColored('stat-roi', (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%', roi >= 0 ? 'positive' : 'negative');
       setText('stat-conf', ((s.avg_confidence ?? 0) * 100).toFixed(1) + '%');
+
+      // Live trading stats
+      setText('live-total', ls.total ?? 0);
+      setText('live-settled', ls.settled ?? 0);
+      const lwr = ls.win_rate ?? 0;
+      const lpnl = ls.total_pnl ?? 0;
+      const lroi = ls.roi_pct ?? 0;
+      document.getElementById('live-winrate').textContent = ls.settled > 0 ? lwr.toFixed(1) + '%' : '—';
+      document.getElementById('live-winrate').style.color = lwr >= 55 ? '#48bb78' : lwr >= 50 ? '#ecc94b' : '#fc8181';
+      document.getElementById('live-pnl').textContent = ls.settled > 0 ? (lpnl >= 0 ? '+' : '') + lpnl.toFixed(2) + ' USDC' : '—';
+      document.getElementById('live-pnl').style.color = lpnl >= 0 ? '#48bb78' : '#fc8181';
+      document.getElementById('live-roi').textContent = ls.settled > 0 ? (lroi >= 0 ? '+' : '') + lroi.toFixed(2) + '%' : '—';
+      document.getElementById('live-roi').style.color = lroi >= 0 ? '#48bb78' : '#fc8181';
 
       // Update win/loss donut
       const wins = s.wins ?? 0;
