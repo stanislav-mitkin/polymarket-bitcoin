@@ -125,6 +125,7 @@
     .badge-win  { background: #1a3a28; color: #48bb78; }
     .badge-loss { background: #3a1a1a; color: #fc8181; }
     .badge-pending { background: #2d2a1a; color: #ecc94b; }
+    .badge-failed  { background: #2a1f2a; color: #9f7aea; }
 
     .refresh-btn {
       background: #2d3748;
@@ -357,9 +358,13 @@
         const signal = `<span class="badge badge-${t.signal.toLowerCase()}">${t.signal}</span>`;
         const conf = t.confidence ?? 0;
         const confBar = `<span class="conf-bar"><span class="conf-bar-fill" style="width:${Math.round(conf*100)}%"></span></span> ${(conf*100).toFixed(1)}%`;
+        const liveStatus = (t.live_status ?? '').toUpperCase();
+        const isFailed = t.mode === 'live' && ['FAILED','REJECTED','CANCELED','CANCELLED','DRY_RUN'].includes(liveStatus);
         const outcome = t.outcome
           ? `<span class="badge ${t.outcome === t.signal ? 'badge-win' : 'badge-loss'}">${t.outcome}</span>`
-          : `<span class="badge badge-pending">pending</span>`;
+          : isFailed
+            ? `<span class="badge badge-failed">${t.live_status ?? 'failed'}</span>`
+            : `<span class="badge badge-pending">pending</span>`;
         const pnl = t.pnl != null
           ? `<span style="color:${t.pnl >= 0 ? '#48bb78' : '#fc8181'}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}</span>`
           : '—';
