@@ -102,6 +102,11 @@ MAX_OPEN_POSITIONS=1
 MAX_DAILY_LOSS_USDC=5
 MAX_CONSECUTIVE_LOSSES=4
 MAX_CONSECUTIVE_TICK_ERRORS=5
+
+# Predictor thresholds
+ML_CONF_THRESHOLD=0.65
+# Optional for shadow mode only:
+# ML_CONF_THRESHOLD_DRY_RUN=0.58
 ```
 
 Live execution notes:
@@ -109,6 +114,7 @@ Live execution notes:
 - `filled_price`, `filled_size`, and `fees_usdc` are persisted on the trade row.
 - Settlement P&L for `mode=live` is computed from reconciled fills (not from snapshot prices).
 - `fees_usdc` is currently estimated from `fee_rate_bps * fill_notional`; validate against exchange statements before scaling size.
+- Lowering confidence threshold increases trade frequency but usually reduces precision; use lower threshold only for shadow-mode diagnostics first.
 
 Step 1 practical rollout (safe dry-run):
 1. Set `TRADING_MODE=live` and `LIVE_DRY_RUN=true`.

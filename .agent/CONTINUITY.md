@@ -15,6 +15,7 @@
 - 2026-04-21T12:07Z [CODE] Settlement now branches by mode: paper keeps legacy formula; live uses reconciled `filled_price`, `filled_size`, and `fees_usdc`.
 - 2026-04-21T12:10Z [CODE] Added dedicated audit script with `--apply` mode instead of silently mutating rows inside bot runtime; operator controls when bulk corrections are applied.
 - 2026-04-22T13:18Z [CODE] For step-1 shadow rollout, preflight now treats geoblock HTTP errors and non-numeric allowance as WARN only when `LIVE_DRY_RUN=true`; strict failure remains for real-live mode.
+- 2026-04-23T06:19Z [USER] Added env-configurable predictor thresholds to tune trade frequency without code edits; dry-run can use a separate lower threshold override.
 
 [PROGRESS]
 - 2026-04-21T11:59Z [CODE] Added `src/bot/live-trader.ts` with pre-trade checks: geoblock cache, acceptingOrders, min order-size buffer, collateral balance/allowance, dry-run toggle, and market order placement path.
@@ -33,6 +34,8 @@
 - 2026-04-22T12:59Z [CODE] Preflight now attempts one-time `updateBalanceAllowance` auto-init when allowance parses as invalid, then re-reads allowance.
 - 2026-04-22T12:59Z [CODE] Runtime collateral guard now fails hard on non-numeric balance/allowance instead of allowing NaN to bypass checks.
 - 2026-04-22T13:18Z [CODE] Runtime live executor now allows non-numeric collateral allowance in dry-run only (logs WARN), while still enforcing balance and full allowance checks in live order mode.
+- 2026-04-23T06:19Z [CODE] Predictor now reads `ML_CONF_THRESHOLD`, `ML_CONF_THRESHOLD_DRY_RUN`, `ML_CONF_THRESHOLD_UP`, `ML_CONF_MAX` from env and logs effective thresholds at startup.
+- 2026-04-23T06:19Z [CODE] Updated `.env.example` and README with threshold knobs and caution about precision degradation at lower thresholds.
 
 [DISCOVERIES]
 - 2026-04-21T11:59Z [TOOL] Local tool environment has `node` but no `npm`; direct `npm run build` cannot be executed here.

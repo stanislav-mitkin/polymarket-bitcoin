@@ -8,10 +8,24 @@ import {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const CONFIDENCE_THRESHOLD = 0.65;    // baseline — below this is near-random (50.7% WR on 203 trades)
-const CONFIDENCE_THRESHOLD_UP = 0.65; // same as DOWN — UP now profitable (52% WR) after BTC uptrend
-const CONFIDENCE_MAX = 0.85;          // cap — overconfident trades: 38.5% WR, -$13.65
+const IS_DRY_RUN_LIVE = process.env.TRADING_MODE === 'live' && parseBoolean(process.env.LIVE_DRY_RUN, false);
+
+const BASE_THRESHOLD = parseThreshold(process.env.ML_CONF_THRESHOLD, 0.65, 'ML_CONF_THRESHOLD');
+const DRY_RUN_THRESHOLD = parseOptionalThreshold(process.env.ML_CONF_THRESHOLD_DRY_RUN, 'ML_CONF_THRESHOLD_DRY_RUN');
+
+// Effective threshold:
+// 1) if live dry-run and ML_CONF_THRESHOLD_DRY_RUN is set → use it
+// 2) else use ML_CONF_THRESHOLD
+const CONFIDENCE_THRESHOLD = IS_DRY_RUN_LIVE && DRY_RUN_THRESHOLD !== null ? DRY_RUN_THRESHOLD : BASE_THRESHOLD;
+const CONFIDENCE_THRESHOLD_UP = parseThreshold(process.env.ML_CONF_THRESHOLD_UP, CONFIDENCE_THRESHOLD, 'ML_CONF_THRESHOLD_UP');
+const CONFIDENCE_MAX = parseThreshold(process.env.ML_CONF_MAX, 0.85, 'ML_CONF_MAX');
 export const TRADE_SIZE_USDC = 10;
+
+console.log(
+  `[Predictor] Thresholds | base=${BASE_THRESHOLD} effective=${CONFIDENCE_THRESHOLD}` +
+  ` up=${CONFIDENCE_THRESHOLD_UP} max=${CONFIDENCE_MAX}` +
+  ` dryRunLive=${IS_DRY_RUN_LIVE}`
+);
 
 // ─── ML model (lazy-loaded, hot-swappable) ────────────────────────────────────
 
@@ -208,4 +222,26 @@ export function predict(f: Features): Prediction | null {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+function parseThreshold(raw: string | undefined, fallback: number, envName: string): number {
+  if (!raw || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0.5 || value >= 0.99) {
+    throw new Error(`Invalid ${envName}="${raw}". Expected number in (0.5, 0.99).`);
+  }
+  return value;
+}
+
+function parseOptionalThreshold(raw: string | undefined, envName: string): number | null {
+  if (!raw || raw.trim() === '') return null;
+  return parseThreshold(raw, 0.65, envName);
+}
+
+function parseBoolean(raw: string | undefined, fallback: boolean): boolean {
+  if (!raw || raw.trim() === '') return fallback;
+  const value = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  throw new Error(`Invalid boolean value "${raw}".`);
 }
