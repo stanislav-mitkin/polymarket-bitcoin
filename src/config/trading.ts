@@ -28,6 +28,7 @@ export interface RiskConfig {
   maxConsecutiveTickErrors: number;
   initialBankrollUsdc: number;
   maxDrawdownPct: number;         // fraction (0.20 = 20%) of initial bankroll
+  bankrollResetAt: string | null; // ISO timestamp; cumPnl counts only trades settled after it
   basePositionPct: number;        // fraction of current bankroll staked baseline
   minPositionUsdc: number;
   maxPositionUsdc: number;
@@ -61,6 +62,7 @@ export function loadTradingConfig(): TradingConfig {
     maxConsecutiveTickErrors: parsePositiveInteger(process.env.MAX_CONSECUTIVE_TICK_ERRORS, 5, 'MAX_CONSECUTIVE_TICK_ERRORS'),
     initialBankrollUsdc: parsePositiveNumber(process.env.INITIAL_BANKROLL_USDC, 100, 'INITIAL_BANKROLL_USDC'),
     maxDrawdownPct: parseFraction(process.env.MAX_DRAWDOWN_PCT, 0.20, 'MAX_DRAWDOWN_PCT'),
+    bankrollResetAt: parseOptionalIsoDate(process.env.LIVE_BANKROLL_RESET_AT, 'LIVE_BANKROLL_RESET_AT'),
     basePositionPct: parseFraction(process.env.BASE_POSITION_PCT, 0.02, 'BASE_POSITION_PCT'),
     minPositionUsdc: parsePositiveNumber(process.env.MIN_POSITION_USDC, 5, 'MIN_POSITION_USDC'),
     maxPositionUsdc: parsePositiveNumber(process.env.MAX_POSITION_USDC, 25, 'MAX_POSITION_USDC'),
@@ -125,6 +127,16 @@ function parseFraction(raw: string | undefined, fallback: number, envName: strin
     throw new Error(`Invalid ${envName}="${raw}". Expected a fraction in (0, 1).`);
   }
   return value;
+}
+
+function parseOptionalIsoDate(raw: string | undefined, envName: string): string | null {
+  if (!raw || raw.trim() === '') return null;
+  const value = raw.trim();
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid ${envName}="${raw}". Expected an ISO-8601 timestamp.`);
+  }
+  return parsed.toISOString();
 }
 
 function sanitizeOptional(raw: string | undefined): string | undefined {

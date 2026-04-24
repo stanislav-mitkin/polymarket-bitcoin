@@ -62,7 +62,7 @@ async function tick(): Promise<void> {
     // daily cap or streak cap but still drain capital. Hard-exits so PM2 will
     // NOT auto-recover — operator must review and reset bankroll intentionally.
     if (tradingConfig.mode === 'live') {
-      const cumulativePnl = getLiveCumulativePnl();
+      const cumulativePnl = getLiveCumulativePnl(tradingConfig.risk.bankrollResetAt);
       const { initialBankrollUsdc, maxDrawdownPct } = tradingConfig.risk;
       const drawdownPct = -cumulativePnl / initialBankrollUsdc;
       if (drawdownPct >= maxDrawdownPct) {
@@ -147,7 +147,7 @@ async function tick(): Promise<void> {
     // half-Kelly with loss-damping on the current bankroll.
     let sizeUsdc = tradingConfig.tradeSizeUsdc;
     if (tradingConfig.mode === 'live') {
-      const bankroll = getLiveBankroll(tradingConfig.risk.initialBankrollUsdc);
+      const bankroll = getLiveBankroll(tradingConfig.risk.initialBankrollUsdc, tradingConfig.risk.bankrollResetAt);
       const sizing = computePositionSize(
         {
           bankrollUsdc: bankroll,
@@ -243,11 +243,12 @@ async function main(): Promise<void> {
     `maxDrawdown=${(tradingConfig.risk.maxDrawdownPct * 100).toFixed(0)}%`
   );
   if (tradingConfig.mode === 'live') {
-    const cumulativePnl = getLiveCumulativePnl();
+    const resetAt = tradingConfig.risk.bankrollResetAt;
+    const cumulativePnl = getLiveCumulativePnl(resetAt);
     const bankroll = tradingConfig.risk.initialBankrollUsdc + cumulativePnl;
     console.log(
       `[Bot] Live bankroll=$${bankroll.toFixed(2)} (initial=$${tradingConfig.risk.initialBankrollUsdc.toFixed(2)}, ` +
-      `cumPnl=$${cumulativePnl.toFixed(2)}) | sizing: base=${(tradingConfig.risk.basePositionPct * 100).toFixed(1)}% ` +
+      `cumPnl=$${cumulativePnl.toFixed(2)}${resetAt ? `, since=${resetAt}` : ''}) | sizing: base=${(tradingConfig.risk.basePositionPct * 100).toFixed(1)}% ` +
       `min=$${tradingConfig.risk.minPositionUsdc} max=$${tradingConfig.risk.maxPositionUsdc} ` +
       `lossDamp=${tradingConfig.risk.lossDampFactor}/loss`
     );

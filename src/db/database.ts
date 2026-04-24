@@ -342,7 +342,16 @@ export function getConsecutiveLosses(): number {
   return losses;
 }
 
-export function getLiveCumulativePnl(): number {
+export function getLiveCumulativePnl(sinceIso?: string | null): number {
+  if (sinceIso) {
+    const row = db.prepare(
+      `SELECT ROUND(COALESCE(SUM(pnl), 0), 6) AS pnl FROM trades
+       WHERE mode = 'live' AND outcome IS NOT NULL AND pnl IS NOT NULL
+         AND settled_at IS NOT NULL
+         AND datetime(settled_at) > datetime(?)`
+    ).get(sinceIso) as { pnl: number | null };
+    return row.pnl ?? 0;
+  }
   const row = db.prepare(
     `SELECT ROUND(COALESCE(SUM(pnl), 0), 6) AS pnl FROM trades
      WHERE mode = 'live' AND outcome IS NOT NULL AND pnl IS NOT NULL`
@@ -350,8 +359,8 @@ export function getLiveCumulativePnl(): number {
   return row.pnl ?? 0;
 }
 
-export function getLiveBankroll(initialUsdc: number): number {
-  return initialUsdc + getLiveCumulativePnl();
+export function getLiveBankroll(initialUsdc: number, sinceIso?: string | null): number {
+  return initialUsdc + getLiveCumulativePnl(sinceIso);
 }
 
 export type LiveTradeReconcileRow = Pick<
