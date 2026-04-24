@@ -55,7 +55,29 @@ async function tick(): Promise<void> {
       return;
     }
 
-    // 1d. Risk limits
+    // 1d. Cumulative drawdown kill-switch (live only — paper PnL is imaginary).
+    // Evaluated BEFORE other risk returns so a breach is never hidden by an
+    // earlier `return` (e.g. daily-loss or consecutive-loss gates).
+    // Protects against slow bleed: many small losses that never breach the
+    // daily cap or streak cap but still drain capital. Hard-exits so PM2 will
+    // NOT auto-recover — operator must review and reset bankroll intentionally.
+    if (tradingConfig.mode === 'live') {
+      const cumulativePnl = getLiveCumulativePnl();
+      const { initialBankrollUsdc, maxDrawdownPct } = tradingConfig.risk;
+      const drawdownPct = -cumulativePnl / initialBankrollUsdc;
+      if (drawdownPct >= maxDrawdownPct) {
+        console.error(
+          `[Bot] KILL-SWITCH: cumulative drawdown=${(drawdownPct * 100).toFixed(2)}% ` +
+          `>= ${(maxDrawdownPct * 100).toFixed(2)}% of initial bankroll $${initialBankrollUsdc.toFixed(2)}. ` +
+          `Cumulative PnL=$${cumulativePnl.toFixed(2)}. Exiting — operator intervention required.`
+        );
+        if (tickIntervalHandle) clearInterval(tickIntervalHandle);
+        if (settleIntervalHandle) clearInterval(settleIntervalHandle);
+        process.exit(1);
+      }
+    }
+
+    // 1e. Other risk limits (soft — just skip this tick)
     const openTrades = countOpenTrades();
     if (openTrades >= tradingConfig.risk.maxOpenPositions) {
       console.log(`[Bot] RISK: open positions=${openTrades} >= ${tradingConfig.risk.maxOpenPositions}, skipping new trade`);
@@ -74,26 +96,6 @@ async function tick(): Promise<void> {
         `[Bot] RISK: consecutive losses=${consecutiveLosses} >= ${tradingConfig.risk.maxConsecutiveLosses}, pause new trades`
       );
       return;
-    }
-
-    // 1e. Cumulative drawdown kill-switch (live only — paper PnL is imaginary).
-    // Protects against slow bleed: many small losses that never breach the
-    // daily cap or streak cap but still drain capital. Hard-exits so PM2 will
-    // NOT auto-recover — operator must review and reset bankroll intentionally.
-    if (tradingConfig.mode === 'live') {
-      const cumulativePnl = getLiveCumulativePnl();
-      const { initialBankrollUsdc, maxDrawdownPct } = tradingConfig.risk;
-      const drawdownPct = -cumulativePnl / initialBankrollUsdc;
-      if (drawdownPct >= maxDrawdownPct) {
-        console.error(
-          `[Bot] KILL-SWITCH: cumulative drawdown=${(drawdownPct * 100).toFixed(2)}% ` +
-          `>= ${(maxDrawdownPct * 100).toFixed(2)}% of initial bankroll $${initialBankrollUsdc.toFixed(2)}. ` +
-          `Cumulative PnL=$${cumulativePnl.toFixed(2)}. Exiting — operator intervention required.`
-        );
-        if (tickIntervalHandle) clearInterval(tickIntervalHandle);
-        if (settleIntervalHandle) clearInterval(settleIntervalHandle);
-        process.exit(1);
-      }
     }
 
     // 2. Find the next active market
